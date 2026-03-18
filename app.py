@@ -132,7 +132,7 @@ def parse_schwab_csv(file):
     df['Amount'] = pd.to_numeric(df['Amount'].str.replace(r'[$,"]', '', regex=True), errors='coerce').fillna(0)
     df['Symbol'] = df['Symbol'].str.strip().str.replace('"', '')
 
-    trades = df[df['Action'].isin(['Buy', 'Sell', 'Reinvest Shares'])].copy()
+    trades = df[df['Action'].isin(['Buy', 'Sell', 'Reinvest Shares', 'Cash In Lieu'])].copy()
 
     # CRITICAL: Sort chronologically — CSV is newest-first but we must process oldest-first
     trades['_parsed_date'] = pd.to_datetime(trades['Date'], format='%m/%d/%Y', errors='coerce')
@@ -160,13 +160,26 @@ def parse_schwab_csv(file):
                 total_realized_pnl += realized
                 p['cost'] -= row['Quantity'] * avg
             p['shares'] -= row['Quantity']
+        elif row['Action'] == 'Cash In Lieu':
+            # Cash In Lieu = proceeds from fractional shares during stock split/corporate action
+            # Treated as a partial sale: reduces cost basis proportionally
+            cash_received = row['Amount']  # positive dollar amount
+            if p['shares'] > 0 and p['cost'] > 0:
+                # What fraction of the position was cashed out?
+                # cash_received / (cash_received + remaining_value) approximation
+                # Simpler: reduce cost basis by the cash received (cost recovery method)
+                cost_reduction = min(cash_received, p['cost'])
+                realized = cash_received - cost_reduction
+                p['cost'] -= cost_reduction
+                p['realized'] += realized
+                total_realized_pnl += realized
 
     # Calculate total deposits (MoneyLink Transfers)
     transfers = df[df['Action'].str.contains('MoneyLink Transfer', na=False)]
-    total_deposits = transfers['Amount'].sum()  # positive = deposits
+    total_deposits = transfers['Amount'].sum()
 
-    # Dividends received (cash dividends + reinvest dividends)
-    divs = df[df['Action'].str.contains('Dividend|Cash In Lieu', na=False, regex=True)]
+    # Dividends: only actual cash dividends and reinvest dividends, NOT Cash In Lieu
+    divs = df[df['Action'].str.contains('Cash Dividend|Reinvest Dividend', na=False, regex=True)]
     total_dividends = divs['Amount'].sum()
 
     rows = []
