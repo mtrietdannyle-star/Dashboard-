@@ -437,6 +437,64 @@ bm_comps = st.session_state.benchmark_components
 total_bm_weight = sum(c['weight'] for c in bm_comps)
 blended_chg = sum((c['weight'] / total_bm_weight) * quotes.get(c['ticker'], {}).get('changePct', 0) for c in bm_comps) if total_bm_weight > 0 else 0
 
+# ── Jensen's Alpha & Cumulative Over/Underperformance ──
+# Uses inception-to-date returns
+jensens_alpha = None
+port_beta_to_bm = None
+cum_port_ret = None
+cum_bm_ret = None
+cum_excess = None
+rf_rate = 0.043  # ~4.3% annualized risk-free (T-bill proxy)
+
+try:
+    inception = st.session_state.inception_date
+    bm_tickers_for_alpha = [c['ticker'] for c in bm_comps]
+    all_alpha_tickers = list(set(active['ticker'].tolist() + bm_tickers_for_alpha))
+    alpha_hist = fetch_history(all_alpha_tickers, inception)
+
+    if not alpha_hist.empty and len(alpha_hist) >= 5:
+        # Daily returns
+        alpha_returns = alpha_hist.pct_change().dropna()
+
+        # Portfolio daily return series (weighted by current holdings)
+        port_daily = pd.Series(0.0, index=alpha_returns.index)
+        for _, row in active.iterrows():
+            t = row['ticker']
+            w = row['weight'] / 100
+            if t in alpha_returns.columns:
+                port_daily += w * alpha_returns[t]
+
+        # Blended benchmark daily return series
+        bm_daily = pd.Series(0.0, index=alpha_returns.index)
+        for c in bm_comps:
+            t = c['ticker']
+            w = c['weight'] / total_bm_weight if total_bm_weight > 0 else 0
+            if t in alpha_returns.columns:
+                bm_daily += w * alpha_returns[t]
+
+        # Cumulative returns
+        cum_port_ret = ((1 + port_daily).cumprod().iloc[-1] - 1) * 100
+        cum_bm_ret = ((1 + bm_daily).cumprod().iloc[-1] - 1) * 100
+        cum_excess = cum_port_ret - cum_bm_ret
+
+        # Annualize
+        n_days = len(alpha_returns)
+        ann_factor = 252 / n_days if n_days > 0 else 1
+        ann_port = ((1 + cum_port_ret / 100) ** ann_factor - 1) * 100
+        ann_bm = ((1 + cum_bm_ret / 100) ** ann_factor - 1) * 100
+
+        # Portfolio beta to benchmark
+        cov_pb = port_daily.cov(bm_daily)
+        var_bm = bm_daily.var()
+        port_beta_to_bm = cov_pb / var_bm if var_bm > 0 else 1.0
+
+        # Jensen's Alpha (annualized) = Rp - [Rf + β(Rm - Rf)]
+        rf_daily = rf_rate / 252
+        jensens_alpha = ann_port - (rf_rate * 100 + port_beta_to_bm * (ann_bm - rf_rate * 100))
+
+except Exception as e:
+    pass
+
 # Sleeves
 etf = active[active['sleeve'] == 'etf']
 stock = active[active['sleeve'] == 'stock']
@@ -485,6 +543,41 @@ with r2c4:
     st.metric("STOCK SLEEVE (DAY)", f"{stock_daily:+.2f}%", f"{stock_w:.1f}% of port \u00b7 {len(stock)} pos \u00b7 {stock_ret:+.1f}% total")
 with r2c5:
     st.metric("PORT VOL (ANN)", f"{port_vol*100:.1f}%" if port_vol > 0 else "\u2014", "30d daily returns \u00d7 \u221a252" if port_vol > 0 else "Need 10+ days data")
+
+# Row 3: Alpha, Cumulative Performance vs Benchmark
+r3c1, r3c2, r3c3, r3c4, r3c5 = st.columns(5)
+with r3c1:
+    if jensens_alpha is not None:
+        st.metric("JENSEN'S \u03b1 (ANN)", f"{jensens_alpha:+.2f}%",
+                  f"Rp\u2212[Rf+\u03b2(Rm\u2212Rf)]",
+                  delta_color="normal" if jensens_alpha >= 0 else "inverse")
+    else:
+        st.metric("JENSEN'S \u03b1 (ANN)", "\u2014", "Need 5+ days history")
+with r3c2:
+    if port_beta_to_bm is not None:
+        st.metric("PORT \u03b2 TO BM", f"{port_beta_to_bm:.2f}", f"Cov(Rp,Rm)/Var(Rm) since inception")
+    else:
+        st.metric("PORT \u03b2 TO BM", "\u2014", "Need 5+ days history")
+with r3c3:
+    if cum_port_ret is not None:
+        st.metric("PORT RTN (INCEP)", f"{cum_port_ret:+.2f}%", f"Since {st.session_state.inception_date}",
+                  delta_color="normal" if cum_port_ret >= 0 else "inverse")
+    else:
+        st.metric("PORT RTN (INCEP)", "\u2014")
+with r3c4:
+    if cum_bm_ret is not None:
+        bm_label_short = '/'.join([c['ticker'] for c in bm_comps])
+        st.metric(f"BM RTN (INCEP)", f"{cum_bm_ret:+.2f}%", f"{bm_label_short} since inception",
+                  delta_color="normal" if cum_bm_ret >= 0 else "inverse")
+    else:
+        st.metric("BM RTN (INCEP)", "\u2014")
+with r3c5:
+    if cum_excess is not None:
+        label = "OUTPERFORMANCE" if cum_excess >= 0 else "UNDERPERFORMANCE"
+        st.metric(label, f"{cum_excess:+.2f}%", f"Port \u2212 BM cumulative",
+                  delta_color="normal" if cum_excess >= 0 else "inverse")
+    else:
+        st.metric("VS BENCHMARK", "\u2014")
 
 # ════════════════════════════════════════════════════
 # PERFORMANCE CHART
