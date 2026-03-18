@@ -5,8 +5,14 @@ import yfinance as yf
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import io
+
+# Eastern timezone (UTC-4 EDT / UTC-5 EST)
+ET_OFFSET = timedelta(hours=-4)  # EDT
+def now_eastern():
+    return datetime.now(timezone.utc) + ET_OFFSET
 
 # ════════════════════════════════════════════════════
 # PAGE CONFIG
@@ -155,7 +161,7 @@ def fetch_history(tickers, start_date, end_date=None):
     if not tickers:
         return pd.DataFrame()
     try:
-        df = yf.download(tickers, start=start_date, end=end_date or datetime.now().strftime('%Y-%m-%d'),
+        df = yf.download(tickers, start=start_date, end=end_date or now_eastern().strftime('%Y-%m-%d'),
                         auto_adjust=True, progress=False)
         if isinstance(df.columns, pd.MultiIndex):
             return df['Close']
@@ -190,6 +196,7 @@ def metric_card(label, value, delta=None, delta_color=None):
 # ════════════════════════════════════════════════════
 # MAIN APP
 # ════════════════════════════════════════════════════
+now_et = now_eastern()
 pos_df = st.session_state.positions
 has_positions = len(pos_df) > 0 and pos_df['shares'].sum() > 0
 
@@ -208,7 +215,7 @@ bm_label = ' / '.join([f"{c['weight']}% {c['ticker']}" for c in st.session_state
 cols_top = st.columns([4, 1, 1, 1, 1])
 with cols_top[0]:
     st.markdown(f'<div class="topbar-title">PORTFOLIO MONITOR</div>', unsafe_allow_html=True)
-    st.caption(f"BM: {bm_label} | {len(pos_df[pos_df['shares']>0]) if has_positions else 0} positions | {datetime.now().strftime('%b %d, %I:%M %p')}")
+    st.caption(f"BM: {bm_label} | {len(pos_df[pos_df['shares']>0]) if has_positions else 0} positions | {now_et.strftime('%b %d, %I:%M %p')}")
 
 # ─── Sidebar: Import & Config ──────────────────────
 with st.sidebar:
@@ -330,9 +337,9 @@ with c7:
 st.markdown("#### PORTFOLIO VS BLENDED BENCHMARK")
 
 period_cols = st.columns([1, 1, 1, 1, 6])
-periods = {'INCEP': st.session_state.inception_date, 'YTD': f'{datetime.now().year}-01-01',
-           '1M': (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'),
-           '7D': (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')}
+periods = {'INCEP': st.session_state.inception_date, 'YTD': f'{now_et.year}-01-01',
+           '1M': (now_et - timedelta(days=30)).strftime('%Y-%m-%d'),
+           '7D': (now_et - timedelta(days=7)).strftime('%Y-%m-%d')}
 
 period_choice = 'INCEP'
 for i, (label, start) in enumerate(periods.items()):
@@ -515,7 +522,7 @@ st.markdown("#### REBALANCE LOG")
 
 with st.expander("ADD ENTRY", expanded=False):
     rc = st.columns([2, 1, 1, 1, 1, 3])
-    with rc[0]: rb_date = st.date_input("Date", value=datetime.now(), key='rb_date')
+    with rc[0]: rb_date = st.date_input("Date", value=now_et, key='rb_date')
     with rc[1]: rb_action = st.selectbox("Action", ['BUY', 'SELL', 'TRIM', 'ADD', 'ROTATE'], key='rb_action')
     with rc[2]: rb_ticker = st.text_input("Ticker", key='rb_ticker')
     with rc[3]: rb_shares = st.number_input("Shares", value=0.0, step=0.01, key='rb_shares')
@@ -544,5 +551,4 @@ else:
 
 # ─── Auto-refresh ───────────────────────────────────
 st.markdown("---")
-st.caption(f"Last updated: {datetime.now().strftime('%I:%M:%S %p')} \u00b7 Auto-refreshes every 60s")
-st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
+st.caption(f"Last updated: {now_et.strftime('%I:%M:%S %p ET')} \u00b7 Refresh page to update prices")
