@@ -1,0 +1,22 @@
+[theme]
+base = "dark"
+primaryColor = "#ff8c00"
+backgroundColor = "#000000"
+secondaryBackgroundColor = "#111111"
+textColor = "#e8e8e8"
+font = "sans serif"
+
+[server]
+headless = true
+```
+
+5. Click **Commit changes**
+
+Your repo should then look like:
+```
+Dashboard-/
+├── .streamlit/
+│   └── config.toml
+├── README.md
+├── app.py
+└── requirements.txt
