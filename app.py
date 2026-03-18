@@ -215,12 +215,17 @@ with st.sidebar:
     st.markdown("### IMPORT SCHWAB CSV")
     uploaded = st.file_uploader("Drop Schwab transaction CSV", type=['csv'], label_visibility='collapsed')
     if uploaded:
-        pos_new, rebal_new, trades = parse_schwab_csv(uploaded)
-        if len(pos_new) > 0:
-            st.session_state.positions = pos_new
-            st.session_state.rebalances = rebal_new
-            st.success(f"Imported {len(pos_new)} positions, {len(rebal_new)} trades")
-            st.rerun()
+        # Only process if this is a new file (avoid infinite rerun loop)
+        file_key = uploaded.name + str(uploaded.size)
+        if st.session_state.get('_last_import') != file_key:
+            pos_new, rebal_new, trades = parse_schwab_csv(uploaded)
+            if len(pos_new) > 0:
+                st.session_state.positions = pos_new
+                st.session_state.rebalances = rebal_new
+                st.session_state._last_import = file_key
+                st.rerun()
+        else:
+            st.success(f"Imported {len(st.session_state.positions)} positions, {len(st.session_state.rebalances)} trades")
 
     st.markdown("---")
     st.markdown("### BENCHMARK")
