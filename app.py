@@ -685,13 +685,65 @@ with st.expander("ADD ENTRY", expanded=False):
     with rc[4]: rb_price = st.number_input("Price", value=0.0, step=0.01, key='rb_price')
     with rc[5]: rb_notes = st.text_input("Notes", key='rb_notes')
     if st.button("LOG REBALANCE"):
-        new_row = pd.DataFrame([{
-            'date': rb_date.strftime('%m/%d/%Y'), 'action': rb_action,
-            'ticker': rb_ticker.upper(), 'shares': rb_shares, 'price': rb_price, 'notes': rb_notes
-        }])
-        st.session_state.rebalances = pd.concat([new_row, st.session_state.rebalances], ignore_index=True)
-        save_to_disk()
-        st.rerun()
+        ticker_up = rb_ticker.upper().strip()
+        if not ticker_up or rb_shares <= 0 or rb_price <= 0:
+            st.error("Enter valid ticker, shares, and price")
+        else:
+            # 1. Log to rebalance journal
+            new_row = pd.DataFrame([{
+                'date': rb_date.strftime('%m/%d/%Y'), 'action': rb_action,
+                'ticker': ticker_up, 'shares': rb_shares, 'price': rb_price, 'notes': rb_notes
+            }])
+            st.session_state.rebalances = pd.concat([new_row, st.session_state.rebalances], ignore_index=True)
+
+            # 2. Update positions
+            pos = st.session_state.positions
+            existing = pos[pos['ticker'] == ticker_up]
+            sleeve = 'etf' if ticker_up in KNOWN_ETFS else 'stock'
+
+            if rb_action in ['BUY', 'ADD']:
+                if len(existing) > 0:
+                    idx = existing.index[0]
+                    old_shares = pos.at[idx, 'shares']
+                    old_cost = old_shares * pos.at[idx, 'avgCost']
+                    new_shares = old_shares + rb_shares
+                    new_cost = old_cost + (rb_shares * rb_price)
+                    pos.at[idx, 'shares'] = round(new_shares, 4)
+                    pos.at[idx, 'avgCost'] = round(new_cost / new_shares, 2) if new_shares > 0 else 0
+                else:
+                    new_pos = pd.DataFrame([{'ticker': ticker_up, 'name': ticker_up, 'sleeve': sleeve,
+                                            'shares': round(rb_shares, 4), 'avgCost': round(rb_price, 2)}])
+                    st.session_state.positions = pd.concat([pos, new_pos], ignore_index=True)
+
+            elif rb_action in ['SELL', 'TRIM']:
+                if len(existing) > 0:
+                    idx = existing.index[0]
+                    old_shares = pos.at[idx, 'shares']
+                    old_avg = pos.at[idx, 'avgCost']
+                    sell_qty = min(rb_shares, old_shares)  # Can't sell more than you own
+
+                    # Track realized P&L
+                    realized_from_sell = (rb_price - old_avg) * sell_qty
+                    acct = st.session_state.account_data
+                    acct['realized_pnl'] = acct.get('realized_pnl', 0) + round(realized_from_sell, 2)
+                    st.session_state.account_data = acct
+
+                    # Reduce shares (avg cost stays the same)
+                    new_shares = old_shares - sell_qty
+                    if new_shares < 0.0001:
+                        st.session_state.positions = pos.drop(idx).reset_index(drop=True)
+                    else:
+                        pos.at[idx, 'shares'] = round(new_shares, 4)
+                else:
+                    st.warning(f"No position in {ticker_up} to sell")
+
+            elif rb_action == 'ROTATE':
+                # ROTATE = sell old + buy new. Notes should specify "FROM:XTN TO:PPI" etc.
+                # Just log it — user handles the buy/sell separately
+                pass
+
+            save_to_disk()
+            st.rerun()
 
 if len(st.session_state.rebalances) > 0:
     rebal = st.session_state.rebalances.copy()
