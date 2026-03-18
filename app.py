@@ -70,6 +70,7 @@ def save_to_disk():
             'rebalances': st.session_state.rebalances.to_dict('records') if isinstance(st.session_state.rebalances, pd.DataFrame) and len(st.session_state.rebalances) > 0 else [],
             'benchmark': st.session_state.benchmark_components,
             'inception': st.session_state.inception_date,
+            'account_data': st.session_state.get('account_data', {}),
         }
         with open(DATA_FILE, 'w') as f:
             json.dump(export, f, default=str)
@@ -109,6 +110,11 @@ if 'inception_date' not in st.session_state:
         st.session_state.inception_date = saved['inception']
     else:
         st.session_state.inception_date = '2026-02-02'
+if 'account_data' not in st.session_state:
+    if saved and saved.get('account_data'):
+        st.session_state.account_data = saved['account_data']
+    else:
+        st.session_state.account_data = {'realized_pnl': 0, 'total_deposits': 0, 'total_dividends': 0}
 
 KNOWN_ETFS = {'SPYM','RSPT','KBWB','PAVE','XBI','XTN','EUAD','AAXJ','SCHP','PPI','XAR',
               'UTES','EWJ','DXJ','EWY','IEMG','SPY','ACWI','QQQ','IWM','VTI','VOO','AGG'}
@@ -129,18 +135,19 @@ def parse_schwab_csv(file):
     trades = df[df['Action'].isin(['Buy', 'Sell', 'Reinvest Shares'])].copy()
 
     # CRITICAL: Sort chronologically — CSV is newest-first but we must process oldest-first
-    # so that sells correctly reduce the average cost of prior buys
     trades['_parsed_date'] = pd.to_datetime(trades['Date'], format='%m/%d/%Y', errors='coerce')
     trades = trades.sort_values('_parsed_date', ascending=True).reset_index(drop=True)
 
-    # Calculate positions using average cost method
+    # Calculate positions using average cost method + track realized P&L
     positions = {}
+    total_realized_pnl = 0.0
+
     for _, row in trades.iterrows():
         sym = row['Symbol']
         if not sym or pd.isna(sym):
             continue
         if sym not in positions:
-            positions[sym] = {'shares': 0.0, 'cost': 0.0, 'desc': row.get('Description', sym)}
+            positions[sym] = {'shares': 0.0, 'cost': 0.0, 'desc': row.get('Description', sym), 'realized': 0.0}
         p = positions[sym]
         if row['Action'] in ['Buy', 'Reinvest Shares']:
             p['shares'] += row['Quantity']
@@ -148,8 +155,19 @@ def parse_schwab_csv(file):
         elif row['Action'] == 'Sell':
             if p['shares'] > 0:
                 avg = p['cost'] / p['shares']
+                realized = (row['Price'] - avg) * row['Quantity']
+                p['realized'] += realized
+                total_realized_pnl += realized
                 p['cost'] -= row['Quantity'] * avg
             p['shares'] -= row['Quantity']
+
+    # Calculate total deposits (MoneyLink Transfers)
+    transfers = df[df['Action'].str.contains('MoneyLink Transfer', na=False)]
+    total_deposits = transfers['Amount'].sum()  # positive = deposits
+
+    # Dividends received (cash dividends + reinvest dividends)
+    divs = df[df['Action'].str.contains('Dividend|Cash In Lieu', na=False, regex=True)]
+    total_dividends = divs['Amount'].sum()
 
     rows = []
     for sym, p in positions.items():
@@ -169,7 +187,14 @@ def parse_schwab_csv(file):
         rebal_rows.append({'date': row['Date'], 'action': action, 'ticker': sym,
                           'shares': row['Quantity'], 'price': row['Price'], 'notes': 'Schwab CSV'})
 
-    return pd.DataFrame(rows), pd.DataFrame(rebal_rows), trades
+    # Account-level data
+    account_data = {
+        'realized_pnl': round(total_realized_pnl, 2),
+        'total_deposits': round(total_deposits, 2),
+        'total_dividends': round(total_dividends, 2),
+    }
+
+    return pd.DataFrame(rows), pd.DataFrame(rebal_rows), trades, account_data
 
 # ════════════════════════════════════════════════════
 # YFINANCE DATA
@@ -271,10 +296,11 @@ with st.sidebar:
         # Only process if this is a new file (avoid infinite rerun loop)
         file_key = uploaded.name + str(uploaded.size)
         if st.session_state.get('_last_import') != file_key:
-            pos_new, rebal_new, trades = parse_schwab_csv(uploaded)
+            pos_new, rebal_new, trades, acct_data = parse_schwab_csv(uploaded)
             if len(pos_new) > 0:
                 st.session_state.positions = pos_new
                 st.session_state.rebalances = rebal_new
+                st.session_state.account_data = acct_data
                 st.session_state._last_import = file_key
                 save_to_disk()
                 st.rerun()
@@ -332,10 +358,21 @@ active['dayPnl'] = active['shares'] * (active['price'] - active['prevClose'])
 
 total_mv = active['mv'].sum()
 total_cost = active['cost'].sum()
-total_pnl = total_mv - total_cost
-total_ret = (total_pnl / total_cost * 100) if total_cost > 0 else 0
+unrealized_pnl = total_mv - total_cost
+unrealized_ret = (unrealized_pnl / total_cost * 100) if total_cost > 0 else 0
 total_daily_pnl = active['dayPnl'].sum()
 daily_ret = (total_daily_pnl / (total_mv - total_daily_pnl) * 100) if (total_mv - total_daily_pnl) > 0 else 0
+
+# Realized P&L from closed positions
+acct = st.session_state.account_data
+realized_pnl = acct.get('realized_pnl', 0)
+total_deposits = acct.get('total_deposits', 0)
+total_dividends = acct.get('total_dividends', 0)
+
+# Total P&L = Realized + Unrealized (true portfolio performance)
+total_pnl = realized_pnl + unrealized_pnl
+# Total return based on deposits (money-weighted)
+total_ret = (total_pnl / total_deposits * 100) if total_deposits > 0 else 0
 
 active['weight'] = np.where(total_mv > 0, (active['mv'] / total_mv) * 100, 0)
 active['ctr'] = active['weight'] * active['dayChg'] / 100
@@ -368,16 +405,25 @@ with c2:
     st.metric("DAY P&L", f"{'+'if total_daily_pnl>=0 else ''}{total_daily_pnl:,.2f}", f"{daily_ret:+.2f}%",
               delta_color="normal" if total_daily_pnl >= 0 else "inverse")
 with c3:
-    st.metric("TOTAL P&L", f"{'+'if total_pnl>=0 else ''}{total_pnl:,.2f}", f"{total_ret:+.2f}%",
+    st.metric("TOTAL P&L", f"{'+'if total_pnl>=0 else ''}{total_pnl:,.2f}", f"{total_ret:+.2f}% on deposits",
               delta_color="normal" if total_pnl >= 0 else "inverse")
 with c4:
-    st.metric("COST BASIS", f"${total_cost:,.2f}")
+    st.metric("UNREALIZED", f"{'+'if unrealized_pnl>=0 else ''}{unrealized_pnl:,.2f}", f"{unrealized_ret:+.2f}%",
+              delta_color="normal" if unrealized_pnl >= 0 else "inverse")
 with c5:
+    st.metric("REALIZED", f"{'+'if realized_pnl>=0 else ''}{realized_pnl:,.2f}", f"Divs: ${total_dividends:,.2f}",
+              delta_color="normal" if realized_pnl >= 0 else "inverse")
+with c6:
     st.metric("BLENDED BM", f"{blended_chg:+.2f}%", f"\u03b1 {alpha:+.2f}%",
               delta_color="normal" if alpha >= 0 else "inverse")
-with c6:
-    st.metric("ETF SLEEVE", f"{etf_daily:+.2f}%", f"{etf_w:.1f}% \u00b7 {len(etf)} pos")
 with c7:
+    st.metric("DEPOSITS", f"${total_deposits:,.2f}")
+
+# Sleeve row below
+sc1, sc2 = st.columns(2)
+with sc1:
+    st.metric("ETF SLEEVE", f"{etf_daily:+.2f}%", f"{etf_w:.1f}% \u00b7 {len(etf)} pos")
+with sc2:
     st.metric("STOCK SLEEVE", f"{stock_daily:+.2f}%", f"{stock_w:.1f}% \u00b7 {len(stock)} pos")
 
 # ════════════════════════════════════════════════════
