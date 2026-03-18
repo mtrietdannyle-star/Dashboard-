@@ -388,7 +388,49 @@ total_pnl = realized_pnl + unrealized_pnl
 total_ret = (total_pnl / total_deposits * 100) if total_deposits > 0 else 0
 
 active['weight'] = np.where(total_mv > 0, (active['mv'] / total_mv) * 100, 0)
-active['ctr'] = active['weight'] * active['dayChg'] / 100
+active['attrib'] = active['weight'] * active['dayChg'] / 100  # Attribution (contribution to return)
+
+# ── CTR: Contribution to Risk ──────────────────────
+# CTR_i = w_i × MCTR_i, where MCTR_i = β_i × σ_P
+# PCR_i = CTR_i / σ_P = w_i × β_i (percent contribution to risk)
+# Uses 30-day daily returns
+active['beta'] = 0.0
+active['mctr'] = 0.0
+active['ctr_risk'] = 0.0
+active['pcr'] = 0.0
+port_vol = 0.0
+
+try:
+    ctr_tickers = active['ticker'].tolist()
+    if len(ctr_tickers) >= 2:
+        ctr_start = (now_et - timedelta(days=45)).strftime('%Y-%m-%d')
+        ctr_hist = fetch_history(ctr_tickers, ctr_start)
+        if not ctr_hist.empty and len(ctr_hist) >= 10:
+            # Daily returns
+            ctr_returns = ctr_hist.pct_change().dropna()
+            # Portfolio weights as array (decimal, not percent)
+            weights = active.set_index('ticker')['weight'].reindex(ctr_returns.columns).fillna(0).values / 100
+            # Portfolio daily return series
+            port_returns = (ctr_returns * weights).sum(axis=1)
+            # Portfolio volatility (annualized)
+            port_vol = port_returns.std() * np.sqrt(252)
+            # Per-asset beta to portfolio
+            for idx, row in active.iterrows():
+                t = row['ticker']
+                if t in ctr_returns.columns:
+                    cov_ip = ctr_returns[t].cov(port_returns)
+                    var_p = port_returns.var()
+                    beta_i = cov_ip / var_p if var_p > 0 else 0
+                    w_i = row['weight'] / 100
+                    mctr_i = beta_i * port_vol
+                    ctr_i = w_i * mctr_i
+                    pcr_i = (ctr_i / port_vol * 100) if port_vol > 0 else 0
+                    active.at[idx, 'beta'] = round(beta_i, 3)
+                    active.at[idx, 'mctr'] = round(mctr_i * 100, 3)  # as percent
+                    active.at[idx, 'ctr_risk'] = round(ctr_i * 100, 3)  # as percent
+                    active.at[idx, 'pcr'] = round(pcr_i, 1)  # percent contribution to risk
+except Exception as e:
+    pass  # Silently fall back to zeros if history unavailable
 
 # Blended benchmark
 bm_comps = st.session_state.benchmark_components
@@ -433,11 +475,13 @@ with c7:
     st.metric("DEPOSITS", f"${total_deposits:,.2f}")
 
 # Sleeve row below
-sc1, sc2 = st.columns(2)
+sc1, sc2, sc3 = st.columns(3)
 with sc1:
     st.metric("ETF SLEEVE", f"{etf_daily:+.2f}%", f"{etf_w:.1f}% \u00b7 {len(etf)} pos")
 with sc2:
     st.metric("STOCK SLEEVE", f"{stock_daily:+.2f}%", f"{stock_w:.1f}% \u00b7 {len(stock)} pos")
+with sc3:
+    st.metric("PORT VOL (ANN)", f"{port_vol*100:.1f}%" if port_vol > 0 else "\u2014", "30d rolling" if port_vol > 0 else None)
 
 # ════════════════════════════════════════════════════
 # PERFORMANCE CHART
@@ -563,17 +607,18 @@ def show_holdings(df):
     if len(df) == 0:
         st.info("No positions")
         return
-    display = df[['ticker', 'sleeve', 'shares', 'avgCost', 'price', 'mv', 'weight', 'dayChg', 'dayPnl', 'totalRet', 'pnl', 'ctr']].copy()
-    display.columns = ['Ticker', 'Sleeve', 'Shares', 'Avg Cost', 'Price', 'Mkt Value', 'Weight %', 'Day Chg %', 'Day P&L', 'Total Rtn %', 'Total P&L', 'CTR %']
+    display = df[['ticker', 'sleeve', 'shares', 'avgCost', 'price', 'mv', 'weight', 'dayChg', 'dayPnl', 'totalRet', 'pnl', 'attrib', 'beta', 'ctr_risk', 'pcr']].copy()
+    display.columns = ['Ticker', 'Sleeve', 'Shares', 'Avg Cost', 'Price', 'Mkt Value', 'Weight %', 'Day Chg %', 'Day P&L', 'Total Rtn %', 'Total P&L', 'Attrib %', 'Beta', 'CTR %', 'PCR %']
     display = display.sort_values('Mkt Value', ascending=False)
 
     st.dataframe(
         display.style.format({
             'Shares': '{:.4f}', 'Avg Cost': '${:.2f}', 'Price': '${:.2f}',
             'Mkt Value': '${:,.2f}', 'Weight %': '{:.1f}%', 'Day Chg %': '{:+.2f}%',
-            'Day P&L': '${:+,.2f}', 'Total Rtn %': '{:+.2f}%', 'Total P&L': '${:+,.2f}', 'CTR %': '{:+.3f}%',
+            'Day P&L': '${:+,.2f}', 'Total Rtn %': '{:+.2f}%', 'Total P&L': '${:+,.2f}',
+            'Attrib %': '{:+.3f}%', 'Beta': '{:.2f}', 'CTR %': '{:+.3f}%', 'PCR %': '{:.1f}%',
         }).applymap(lambda v: 'color: #00d26a' if isinstance(v, (int, float)) and v > 0 else ('color: #ff3b3b' if isinstance(v, (int, float)) and v < 0 else ''),
-                   subset=['Day Chg %', 'Day P&L', 'Total Rtn %', 'Total P&L', 'CTR %']),
+                   subset=['Day Chg %', 'Day P&L', 'Total Rtn %', 'Total P&L', 'Attrib %']),
         use_container_width=True, height=min(400, 40 + len(display) * 35)
     )
 
