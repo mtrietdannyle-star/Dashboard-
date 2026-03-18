@@ -4,7 +4,6 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 import plotly.express as px
-from datetime import datetime, timedelta
 from datetime import datetime, timedelta, timezone
 import json
 import io
@@ -58,16 +57,58 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════
-# SESSION STATE DEFAULTS
+# PERSISTENT STORAGE — survives page refresh
 # ════════════════════════════════════════════════════
+import os
+DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'portfolio_data.json')
+
+def save_to_disk():
+    """Save current state to JSON file"""
+    try:
+        export = {
+            'positions': st.session_state.positions.to_dict('records') if isinstance(st.session_state.positions, pd.DataFrame) and len(st.session_state.positions) > 0 else [],
+            'rebalances': st.session_state.rebalances.to_dict('records') if isinstance(st.session_state.rebalances, pd.DataFrame) and len(st.session_state.rebalances) > 0 else [],
+            'benchmark': st.session_state.benchmark_components,
+            'inception': st.session_state.inception_date,
+        }
+        with open(DATA_FILE, 'w') as f:
+            json.dump(export, f, default=str)
+    except Exception as e:
+        pass  # Silent fail on write errors
+
+def load_from_disk():
+    """Load saved state from JSON file"""
+    try:
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, 'r') as f:
+                data = json.load(f)
+            return data
+    except:
+        pass
+    return None
+
+# Initialize session state — try loading from disk first
+saved = load_from_disk()
 if 'positions' not in st.session_state:
-    st.session_state.positions = pd.DataFrame(columns=['ticker','name','sleeve','shares','avgCost'])
+    if saved and saved.get('positions'):
+        st.session_state.positions = pd.DataFrame(saved['positions'])
+    else:
+        st.session_state.positions = pd.DataFrame(columns=['ticker','name','sleeve','shares','avgCost'])
 if 'rebalances' not in st.session_state:
-    st.session_state.rebalances = pd.DataFrame(columns=['date','action','ticker','shares','price','notes'])
+    if saved and saved.get('rebalances'):
+        st.session_state.rebalances = pd.DataFrame(saved['rebalances'])
+    else:
+        st.session_state.rebalances = pd.DataFrame(columns=['date','action','ticker','shares','price','notes'])
 if 'benchmark_components' not in st.session_state:
-    st.session_state.benchmark_components = [{'ticker': 'SPY', 'weight': 60}, {'ticker': 'ACWI', 'weight': 40}]
+    if saved and saved.get('benchmark'):
+        st.session_state.benchmark_components = saved['benchmark']
+    else:
+        st.session_state.benchmark_components = [{'ticker': 'SPY', 'weight': 60}, {'ticker': 'ACWI', 'weight': 40}]
 if 'inception_date' not in st.session_state:
-    st.session_state.inception_date = '2026-02-02'
+    if saved and saved.get('inception'):
+        st.session_state.inception_date = saved['inception']
+    else:
+        st.session_state.inception_date = '2026-02-02'
 
 KNOWN_ETFS = {'SPYM','RSPT','KBWB','PAVE','XBI','XTN','EUAD','AAXJ','SCHP','PPI','XAR',
               'UTES','EWJ','DXJ','EWY','IEMG','SPY','ACWI','QQQ','IWM','VTI','VOO','AGG'}
@@ -86,6 +127,11 @@ def parse_schwab_csv(file):
     df['Symbol'] = df['Symbol'].str.strip().str.replace('"', '')
 
     trades = df[df['Action'].isin(['Buy', 'Sell', 'Reinvest Shares'])].copy()
+
+    # CRITICAL: Sort chronologically — CSV is newest-first but we must process oldest-first
+    # so that sells correctly reduce the average cost of prior buys
+    trades['_parsed_date'] = pd.to_datetime(trades['Date'], format='%m/%d/%Y', errors='coerce')
+    trades = trades.sort_values('_parsed_date', ascending=True).reset_index(drop=True)
 
     # Calculate positions using average cost method
     positions = {}
@@ -230,6 +276,7 @@ with st.sidebar:
                 st.session_state.positions = pos_new
                 st.session_state.rebalances = rebal_new
                 st.session_state._last_import = file_key
+                save_to_disk()
                 st.rerun()
         else:
             st.success(f"Imported {len(st.session_state.positions)} positions, {len(st.session_state.rebalances)} trades")
@@ -245,12 +292,14 @@ with st.sidebar:
         if bm2_t:
             comps.append({'ticker': bm2_t.upper(), 'weight': bm2_w})
         st.session_state.benchmark_components = comps
+        save_to_disk()
         st.rerun()
 
     st.markdown("---")
     st.markdown("### INCEPTION DATE")
     inc = st.date_input("Portfolio start", value=datetime.strptime(st.session_state.inception_date, '%Y-%m-%d'))
     st.session_state.inception_date = inc.strftime('%Y-%m-%d')
+    save_to_disk()
 
     st.markdown("---")
     st.markdown("### DATA EXPORT")
@@ -534,6 +583,7 @@ with st.expander("ADD ENTRY", expanded=False):
             'ticker': rb_ticker.upper(), 'shares': rb_shares, 'price': rb_price, 'notes': rb_notes
         }])
         st.session_state.rebalances = pd.concat([new_row, st.session_state.rebalances], ignore_index=True)
+        save_to_disk()
         st.rerun()
 
 if len(st.session_state.rebalances) > 0:
