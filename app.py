@@ -436,7 +436,6 @@ except Exception as e:
 bm_comps = st.session_state.benchmark_components
 total_bm_weight = sum(c['weight'] for c in bm_comps)
 blended_chg = sum((c['weight'] / total_bm_weight) * quotes.get(c['ticker'], {}).get('changePct', 0) for c in bm_comps) if total_bm_weight > 0 else 0
-alpha = daily_ret - blended_chg
 
 # Sleeves
 etf = active[active['sleeve'] == 'etf']
@@ -453,35 +452,39 @@ stock_ret = ((stock_mv - stock['cost'].sum()) / stock['cost'].sum() * 100) if st
 # ════════════════════════════════════════════════════
 # SUMMARY STRIP
 # ════════════════════════════════════════════════════
-c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
-with c1:
-    st.metric("MKT VALUE", f"${total_mv:,.2f}")
-with c2:
-    st.metric("DAY P&L", f"{'+'if total_daily_pnl>=0 else ''}{total_daily_pnl:,.2f}", f"{daily_ret:+.2f}%",
+# Row 1: Portfolio-level P&L
+r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
+with r1c1:
+    st.metric("NET EQUITY", f"${total_mv:,.2f}", f"Cost: ${total_cost:,.2f}")
+with r1c2:
+    st.metric("DAY P&L", f"{'+'if total_daily_pnl>=0 else ''}{total_daily_pnl:,.2f}", f"{daily_ret:+.2f}% today",
               delta_color="normal" if total_daily_pnl >= 0 else "inverse")
-with c3:
-    st.metric("TOTAL P&L", f"{'+'if total_pnl>=0 else ''}{total_pnl:,.2f}", f"{total_ret:+.2f}% on deposits",
-              delta_color="normal" if total_pnl >= 0 else "inverse")
-with c4:
-    st.metric("UNREALIZED", f"{'+'if unrealized_pnl>=0 else ''}{unrealized_pnl:,.2f}", f"{unrealized_ret:+.2f}%",
+with r1c3:
+    st.metric("UNREALIZED P&L", f"{'+'if unrealized_pnl>=0 else ''}{unrealized_pnl:,.2f}", f"{unrealized_ret:+.2f}% vs cost",
               delta_color="normal" if unrealized_pnl >= 0 else "inverse")
-with c5:
-    st.metric("REALIZED", f"{'+'if realized_pnl>=0 else ''}{realized_pnl:,.2f}", f"Divs: ${total_dividends:,.2f}",
+with r1c4:
+    st.metric("REALIZED P&L", f"{'+'if realized_pnl>=0 else ''}{realized_pnl:,.2f}", f"Divs: ${total_dividends:,.2f}",
               delta_color="normal" if realized_pnl >= 0 else "inverse")
-with c6:
-    st.metric("BLENDED BM", f"{blended_chg:+.2f}%", f"\u03b1 {alpha:+.2f}%",
-              delta_color="normal" if alpha >= 0 else "inverse")
-with c7:
-    st.metric("DEPOSITS", f"${total_deposits:,.2f}")
+with r1c5:
+    st.metric("TOTAL P&L", f"{'+'if total_pnl>=0 else ''}{total_pnl:,.2f}", f"{total_ret:+.2f}% on ${total_deposits:,.0f} deposited",
+              delta_color="normal" if total_pnl >= 0 else "inverse")
 
-# Sleeve row below
-sc1, sc2, sc3 = st.columns(3)
-with sc1:
-    st.metric("ETF SLEEVE", f"{etf_daily:+.2f}%", f"{etf_w:.1f}% \u00b7 {len(etf)} pos")
-with sc2:
-    st.metric("STOCK SLEEVE", f"{stock_daily:+.2f}%", f"{stock_w:.1f}% \u00b7 {len(stock)} pos")
-with sc3:
-    st.metric("PORT VOL (ANN)", f"{port_vol*100:.1f}%" if port_vol > 0 else "\u2014", "30d rolling" if port_vol > 0 else None)
+# Row 2: Benchmark, Alpha, Sleeves, Vol
+r2c1, r2c2, r2c3, r2c4, r2c5 = st.columns(5)
+with r2c1:
+    bm_parts = ' / '.join([f"{c['ticker']} {quotes.get(c['ticker'],{}).get('changePct',0):+.2f}%" for c in bm_comps])
+    st.metric("BM DAY CHG", f"{blended_chg:+.2f}%", bm_parts)
+with r2c2:
+    # Excess return = portfolio daily return - benchmark daily return (NOT Jensen's alpha)
+    excess = daily_ret - blended_chg
+    st.metric("EXCESS RTN (DAY)", f"{excess:+.2f}%", "Port day - BM day",
+              delta_color="normal" if excess >= 0 else "inverse")
+with r2c3:
+    st.metric("ETF SLEEVE (DAY)", f"{etf_daily:+.2f}%", f"{etf_w:.1f}% of port \u00b7 {len(etf)} pos \u00b7 {etf_ret:+.1f}% total")
+with r2c4:
+    st.metric("STOCK SLEEVE (DAY)", f"{stock_daily:+.2f}%", f"{stock_w:.1f}% of port \u00b7 {len(stock)} pos \u00b7 {stock_ret:+.1f}% total")
+with r2c5:
+    st.metric("PORT VOL (ANN)", f"{port_vol*100:.1f}%" if port_vol > 0 else "\u2014", "30d daily returns \u00d7 \u221a252" if port_vol > 0 else "Need 10+ days data")
 
 # ════════════════════════════════════════════════════
 # PERFORMANCE CHART
