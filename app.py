@@ -72,6 +72,7 @@ def save_to_disk():
             'inception': st.session_state.inception_date,
             'account_data': st.session_state.get('account_data', {}),
             'target_weights': st.session_state.get('target_weights', {}),
+            'geo_exposure': st.session_state.get('geo_exposure', {}),
         }
         with open(DATA_FILE, 'w') as f:
             json.dump(export, f, default=str)
@@ -120,7 +121,26 @@ if 'target_weights' not in st.session_state:
     if saved and saved.get('target_weights'):
         st.session_state.target_weights = saved['target_weights']
     else:
-        st.session_state.target_weights = {}  # {'SPYM': 10, 'RSPT': 12, ...}
+        st.session_state.target_weights = {}
+if 'geo_exposure' not in st.session_state:
+    if saved and saved.get('geo_exposure'):
+        st.session_state.geo_exposure = saved['geo_exposure']
+    else:
+        # Default geo mappings for known ETFs/stocks (% by region)
+        # Regions: US, Europe, Asia ex-JP, Japan, EM, Global
+        st.session_state.geo_exposure = {
+            'SPYM':  {'US': 100},
+            'RSPT':  {'US': 100},
+            'KBWB':  {'US': 100},
+            'PAVE':  {'US': 100},
+            'XBI':   {'US': 100},
+            'XAR':   {'US': 100},
+            'PPI':   {'US': 40, 'Global': 60},
+            'EUAD':  {'Europe': 100},
+            'AAXJ':  {'Asia ex-JP': 70, 'EM': 30},
+            'MSCI':  {'US': 60, 'Europe': 15, 'Asia ex-JP': 15, 'Global': 10},
+            'FTNT':  {'US': 55, 'Europe': 25, 'Asia ex-JP': 10, 'Global': 10},
+        }  # {'SPYM': 10, 'RSPT': 12, ...}
 
 KNOWN_ETFS = {'SPYM','RSPT','KBWB','PAVE','XBI','XTN','EUAD','AAXJ','SCHP','PPI','XAR',
               'UTES','EWJ','DXJ','EWY','IEMG','SPY','ACWI','QQQ','IWM','VTI','VOO','AGG'}
@@ -751,6 +771,202 @@ with sl2:
     with s3: st.metric("TOTAL RTN", f"{stock_ret:+.2f}%", delta_color="normal" if stock_ret >= 0 else "inverse")
 
 # ════════════════════════════════════════════════════
+# GEOGRAPHIC EXPOSURE — COUNTRY-LEVEL WORLD MAP
+# ════════════════════════════════════════════════════
+st.markdown("#### GEOGRAPHIC EXPOSURE")
+
+# ISO 3-letter codes for Plotly choropleth
+# Country-level breakdowns based on ETF index compositions and stock revenue splits
+GEO_MAP = {
+    # US-dominated ETFs
+    'SPYM': {'USA': 100},
+    'RSPT': {'USA': 100},
+    'KBWB': {'USA': 100},
+    'PAVE': {'USA': 97, 'CAN': 3},
+    'XBI':  {'USA': 100},
+    'XAR':  {'USA': 100},
+    'XTN':  {'USA': 100},
+    'UTES': {'USA': 100},
+    'SCHP': {'USA': 100},
+    'SPY':  {'USA': 100},
+    'QQQ':  {'USA': 97, 'CHN': 1, 'NLD': 1, 'ARG': 1},
+    'VTI':  {'USA': 100},
+    'VOO':  {'USA': 100},
+    'IWM':  {'USA': 100},
+    'AGG':  {'USA': 100},
+    # Real assets / global
+    'PPI':  {'USA': 40, 'CAN': 10, 'AUS': 8, 'GBR': 7, 'BRA': 5, 'ZAF': 4, 'NOR': 3, 'JPN': 3, 'FRA': 3, 'DEU': 2, 'CHN': 2, 'MEX': 2, 'RUS': 2, 'SAU': 2, 'IDN': 2, 'IND': 2, 'CHL': 1, 'PER': 1, 'COL': 1},
+    # Europe
+    'EUAD': {'DEU': 18, 'FRA': 18, 'CHE': 16, 'NLD': 12, 'GBR': 10, 'SWE': 6, 'ITA': 5, 'ESP': 5, 'DNK': 4, 'FIN': 3, 'BEL': 3},
+    # Asia ex-Japan
+    'AAXJ': {'CHN': 28, 'IND': 22, 'TWN': 18, 'KOR': 12, 'HKG': 4, 'SGP': 3, 'IDN': 3, 'THA': 3, 'MYS': 3, 'PHL': 2, 'VNM': 2},
+    'EWY':  {'KOR': 100},
+    'EWJ':  {'JPN': 100},
+    'DXJ':  {'JPN': 100},
+    'IEMG': {'CHN': 24, 'IND': 18, 'TWN': 17, 'KOR': 12, 'BRA': 5, 'SAU': 4, 'ZAF': 3, 'MEX': 3, 'THA': 2, 'IDN': 2, 'MYS': 2, 'TUR': 2, 'POL': 2, 'CHL': 1, 'PHL': 1, 'ARE': 1, 'QAT': 1},
+    # ACWI
+    'ACWI': {'USA': 62, 'JPN': 6, 'GBR': 4, 'CHN': 3, 'FRA': 3, 'CAN': 3, 'CHE': 2, 'DEU': 2, 'AUS': 2, 'IND': 2, 'TWN': 2, 'KOR': 2, 'NLD': 1, 'SWE': 1, 'ITA': 1, 'ESP': 1, 'BRA': 1, 'HKG': 1, 'DNK': 1},
+    # Stocks (revenue-based geographic split)
+    'MSCI': {'USA': 45, 'GBR': 10, 'JPN': 8, 'DEU': 5, 'FRA': 5, 'CHN': 5, 'IND': 4, 'AUS': 3, 'HKG': 3, 'CAN': 3, 'BRA': 3, 'KOR': 2, 'SGP': 2, 'CHE': 2},
+    'FTNT': {'USA': 40, 'DEU': 6, 'GBR': 6, 'FRA': 5, 'JPN': 5, 'CAN': 4, 'AUS': 4, 'ITA': 3, 'NLD': 3, 'KOR': 3, 'IND': 3, 'BRA': 3, 'MEX': 2, 'ESP': 2, 'CHE': 2, 'SGP': 2, 'TWN': 2, 'SAU': 2, 'ARE': 1, 'ZAF': 1, 'IDN': 1},
+}
+
+# ISO code to display name
+ISO_TO_NAME = {
+    'USA': 'United States', 'CAN': 'Canada', 'GBR': 'United Kingdom', 'DEU': 'Germany',
+    'FRA': 'France', 'CHE': 'Switzerland', 'NLD': 'Netherlands', 'SWE': 'Sweden',
+    'ITA': 'Italy', 'ESP': 'Spain', 'DNK': 'Denmark', 'FIN': 'Finland', 'BEL': 'Belgium',
+    'NOR': 'Norway', 'POL': 'Poland', 'AUT': 'Austria', 'IRL': 'Ireland', 'PRT': 'Portugal',
+    'JPN': 'Japan', 'CHN': 'China', 'IND': 'India', 'TWN': 'Taiwan', 'KOR': 'South Korea',
+    'HKG': 'Hong Kong', 'SGP': 'Singapore', 'IDN': 'Indonesia', 'THA': 'Thailand',
+    'MYS': 'Malaysia', 'PHL': 'Philippines', 'VNM': 'Vietnam',
+    'AUS': 'Australia', 'NZL': 'New Zealand',
+    'BRA': 'Brazil', 'MEX': 'Mexico', 'CHL': 'Chile', 'COL': 'Colombia', 'PER': 'Peru', 'ARG': 'Argentina',
+    'ZAF': 'South Africa', 'SAU': 'Saudi Arabia', 'ARE': 'UAE', 'QAT': 'Qatar', 'TUR': 'Turkey',
+    'RUS': 'Russia', 'ISR': 'Israel',
+}
+
+# Compute portfolio-weighted country exposure
+country_exposure = {}  # ISO code -> portfolio %
+per_ticker_countries = []  # for detail table
+unmapped_tickers = []
+
+for _, row in active.iterrows():
+    t = row['ticker']
+    w = row['weight'] / 100  # decimal
+    geo = GEO_MAP.get(t)
+    if geo is None:
+        unmapped_tickers.append(t)
+        geo = {'USA': 100}  # default unmapped to US
+
+    ticker_countries = {}
+    for iso, pct in geo.items():
+        contrib = w * pct  # portfolio contribution %
+        country_exposure[iso] = country_exposure.get(iso, 0) + contrib
+        ticker_countries[iso] = round(contrib, 2)
+
+    per_ticker_countries.append({'Ticker': t, 'Weight': row['weight'], 'countries': geo, 'contributions': ticker_countries})
+
+# Sort by exposure
+sorted_countries = sorted(country_exposure.items(), key=lambda x: -x[1])
+country_df = pd.DataFrame(sorted_countries, columns=['ISO', 'Exposure'])
+country_df['Country'] = country_df['ISO'].map(lambda x: ISO_TO_NAME.get(x, x))
+country_df['Exposure'] = country_df['Exposure'].round(2)
+
+# DM vs EM classification
+DM_CODES = {'USA','CAN','GBR','DEU','FRA','CHE','NLD','SWE','ITA','ESP','DNK','FIN','BEL','NOR','AUT','IRL','PRT','JPN','AUS','NZL','SGP','HKG','ISR'}
+dm_pct = sum(v for k, v in country_exposure.items() if k in DM_CODES)
+em_pct = sum(v for k, v in country_exposure.items() if k not in DM_CODES)
+
+if len(country_df) > 0:
+    # ─── World Choropleth Map ─────────────────────
+    fig_map = go.Figure(data=go.Choropleth(
+        locations=country_df['ISO'],
+        z=country_df['Exposure'],
+        text=country_df['Country'],
+        colorscale=[
+            [0, '#111111'],
+            [0.01, '#1a0a00'],
+            [0.05, '#4d1f00'],
+            [0.15, '#803300'],
+            [0.3, '#b34700'],
+            [0.5, '#cc6600'],
+            [0.7, '#ff8c00'],
+            [1.0, '#ffbb33'],
+        ],
+        colorbar=dict(
+            title=dict(text='Exposure %', font=dict(color='#999', size=10)),
+            tickfont=dict(color='#999', size=9),
+            ticksuffix='%',
+            bgcolor='rgba(0,0,0,0)',
+            len=0.6,
+        ),
+        marker_line_color='#333',
+        marker_line_width=0.5,
+        hovertemplate='<b>%{text}</b><br>Exposure: %{z:.1f}%<extra></extra>',
+    ))
+    fig_map.update_layout(
+        template='plotly_dark',
+        paper_bgcolor='#000',
+        plot_bgcolor='#000',
+        geo=dict(
+            showframe=False,
+            showcoastlines=True,
+            coastlinecolor='#333',
+            showland=True,
+            landcolor='#0a0a0a',
+            showocean=True,
+            oceancolor='#000',
+            showlakes=False,
+            showcountries=True,
+            countrycolor='#222',
+            projection_type='natural earth',
+            bgcolor='#000',
+        ),
+        margin=dict(l=0, r=0, t=10, b=10),
+        height=380,
+    )
+    st.plotly_chart(fig_map, use_container_width=True)
+
+    # ─── Summary metrics ──────────────────────────
+    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+    with mc1:
+        st.metric("DEVELOPED MKT", f"{dm_pct:.1f}%")
+    with mc2:
+        st.metric("EMERGING MKT", f"{em_pct:.1f}%")
+    with mc3:
+        top1 = sorted_countries[0] if sorted_countries else ('', 0)
+        st.metric(f"#1 {ISO_TO_NAME.get(top1[0], top1[0])}", f"{top1[1]:.1f}%")
+    with mc4:
+        top2 = sorted_countries[1] if len(sorted_countries) > 1 else ('', 0)
+        st.metric(f"#2 {ISO_TO_NAME.get(top2[0], top2[0])}", f"{top2[1]:.1f}%")
+    with mc5:
+        top3 = sorted_countries[2] if len(sorted_countries) > 2 else ('', 0)
+        st.metric(f"#3 {ISO_TO_NAME.get(top3[0], top3[0])}", f"{top3[1]:.1f}%")
+
+    # Concentration warning
+    if sorted_countries and sorted_countries[0][1] > 70:
+        st.warning(f"Concentrated: {sorted_countries[0][1]:.0f}% in {ISO_TO_NAME.get(sorted_countries[0][0], sorted_countries[0][0])}")
+
+    # ─── Top countries bar chart ──────────────────
+    top_n = country_df.head(15).sort_values('Exposure', ascending=True)
+    fig_bar = go.Figure()
+    fig_bar.add_trace(go.Bar(
+        y=top_n['Country'], x=top_n['Exposure'], orientation='h',
+        marker_color='#ff8c00',
+        text=[f"{v:.1f}%" for v in top_n['Exposure']],
+        textposition='outside', textfont=dict(size=10, color='#e8e8e8'),
+    ))
+    fig_bar.update_layout(
+        template='plotly_dark', paper_bgcolor='#111', plot_bgcolor='#111',
+        margin=dict(l=100, r=40, t=5, b=5), height=max(200, len(top_n) * 28),
+        xaxis=dict(title='Portfolio Exposure %', gridcolor='#222'),
+        yaxis=dict(gridcolor='#222'),
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+    # ─── Full country table ───────────────────────
+    with st.expander("ALL COUNTRIES TABLE", expanded=False):
+        display_geo = country_df[['Country', 'ISO', 'Exposure']].copy()
+        display_geo['Category'] = display_geo['ISO'].map(lambda x: 'DM' if x in DM_CODES else 'EM')
+        st.dataframe(
+            display_geo.style.format({'Exposure': '{:.2f}%'}).bar(
+                subset=['Exposure'], color='rgba(255,140,0,0.3)', vmin=0, vmax=display_geo['Exposure'].max()
+            ), use_container_width=True, height=min(400, 40 + len(display_geo) * 30)
+        )
+
+    # ─── Per-position contribution ────────────────
+    with st.expander("CONTRIBUTION BY POSITION", expanded=False):
+        for item in sorted(per_ticker_countries, key=lambda x: -x['Weight']):
+            t = item['Ticker']
+            top_3 = sorted(item['countries'].items(), key=lambda x: -x[1])[:3]
+            top_str = ', '.join([f"{ISO_TO_NAME.get(k,k)} {v}%" for k, v in top_3])
+            st.markdown(f"**{t}** ({item['Weight']:.1f}% of port) \u2014 {top_str}")
+
+    if unmapped_tickers:
+        st.caption(f"Unmapped (defaulted to US): {', '.join(unmapped_tickers)}")
+
+# ════════════════════════════════════════════════════
 # LIVE PRICES PANEL
 # ════════════════════════════════════════════════════
 with st.expander("LIVE PRICES", expanded=False):
@@ -946,6 +1162,7 @@ with sleeve_tab_etf:
 with sleeve_tab_stock:
     stock_targets = tw_all.get('stock', {})
     render_sleeve_drift('stock', stock, stock_targets, stock_mv, '#ffd700')
+
 
 # ════════════════════════════════════════════════════
 # REBALANCE LOG
