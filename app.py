@@ -771,155 +771,134 @@ with st.expander("LIVE PRICES", expanded=False):
         subset=['Chg %']), use_container_width=True)
 
 # ════════════════════════════════════════════════════
-# TARGET ALLOCATION & DRIFT ANALYSIS
+# TARGET ALLOCATION & DRIFT BY SLEEVE
 # ════════════════════════════════════════════════════
 st.markdown("#### TARGET ALLOCATION & DRIFT")
 
-# Editor for target weights
-tw_current = st.session_state.target_weights.copy()
-all_position_tickers = active['ticker'].tolist()
+# Helper: build drift analysis for a sleeve
+def render_sleeve_drift(sleeve_name, sleeve_df, sleeve_targets, sleeve_mv, color_accent):
+    """Render target editor, pie charts, drift table, and bar chart for one sleeve"""
+    tickers_in_sleeve = sleeve_df['ticker'].tolist()
+    st_targets = sleeve_targets.copy()
 
-# Auto-populate missing tickers with 0
-for t in all_position_tickers:
-    if t not in tw_current:
-        tw_current[t] = 0.0
+    # Auto-populate missing tickers with 0
+    for t in tickers_in_sleeve:
+        if t not in st_targets:
+            st_targets[t] = 0.0
 
-with st.expander("EDIT TARGET WEIGHTS", expanded=False):
-    st.caption("Enter target weight (%) for each position. Should sum to 100%. Cash allocation = 100% minus sum of targets.")
-    tw_cols = st.columns(4)
-    updated_targets = {}
-    sorted_tickers = sorted(tw_current.keys())
-    for i, ticker in enumerate(sorted_tickers):
-        with tw_cols[i % 4]:
-            sleeve_label = 'ETF' if ticker in KNOWN_ETFS else 'STK'
-            val = st.number_input(
-                f"{ticker} ({sleeve_label})",
-                value=float(tw_current.get(ticker, 0)),
-                min_value=0.0, max_value=100.0, step=0.5,
-                key=f'tw_{ticker}'
-            )
-            updated_targets[ticker] = val
+    has_targets = any(v > 0 for v in st_targets.values())
 
-    tw_sum = sum(updated_targets.values())
-    cash_target = max(0, 100 - tw_sum)
-    st.caption(f"Sum: {tw_sum:.1f}% | Implied cash: {cash_target:.1f}%")
+    # Editor
+    with st.expander(f"EDIT {sleeve_name.upper()} TARGETS", expanded=False):
+        st.caption(f"Enter target weight (%) for each position within the {sleeve_name} sleeve. Should sum to 100% of the sleeve.")
+        n_cols = min(4, max(1, len(st_targets)))
+        tw_cols = st.columns(n_cols)
+        updated = {}
+        for i, ticker in enumerate(sorted(st_targets.keys())):
+            with tw_cols[i % n_cols]:
+                val = st.number_input(
+                    ticker, value=float(st_targets.get(ticker, 0)),
+                    min_value=0.0, max_value=100.0, step=0.5,
+                    key=f'tw_{sleeve_name}_{ticker}'
+                )
+                updated[ticker] = val
 
-    if st.button("SAVE TARGETS"):
-        st.session_state.target_weights = updated_targets
-        save_to_disk()
-        st.success("Target weights saved")
-        st.rerun()
+        tw_sum = sum(updated.values())
+        cash_alloc = max(0, 100 - tw_sum)
+        st.caption(f"Sum: {tw_sum:.1f}% | Unallocated: {cash_alloc:.1f}%")
 
-# Build drift table
-target_w = st.session_state.target_weights
-has_targets = any(v > 0 for v in target_w.values())
+        if st.button(f"SAVE {sleeve_name.upper()} TARGETS", key=f'save_tw_{sleeve_name}'):
+            tw_all = st.session_state.target_weights.copy()
+            tw_all[sleeve_name] = updated
+            st.session_state.target_weights = tw_all
+            save_to_disk()
+            st.success(f"{sleeve_name} targets saved")
+            st.rerun()
 
-if has_targets and total_mv > 0:
+    if not has_targets or sleeve_mv <= 0:
+        st.info(f"Set {sleeve_name} target weights above to see drift analysis.")
+        return
+
+    # Build drift data (weights within the sleeve, not total portfolio)
     drift_rows = []
-    for _, row in active.iterrows():
+    for _, row in sleeve_df.iterrows():
         t = row['ticker']
-        actual_w = row['weight']  # already in %
-        target = target_w.get(t, 0)
+        actual_w = (row['mv'] / sleeve_mv * 100) if sleeve_mv > 0 else 0
+        target = st_targets.get(t, 0)
         drift = actual_w - target
         status = 'OW' if drift > 0.5 else ('UW' if drift < -0.5 else 'ON TARGET')
-        # Dollar amount to rebalance
-        target_mv = total_mv * target / 100
-        actual_mv = row['mv']
-        rebal_amount = target_mv - actual_mv  # positive = need to buy, negative = need to sell
-
+        target_mv_val = sleeve_mv * target / 100
+        rebal = target_mv_val - row['mv']
         drift_rows.append({
-            'Ticker': t,
-            'Sleeve': row['sleeve'].upper(),
-            'Actual %': actual_w,
-            'Target %': target,
-            'Drift %': drift,
-            'Status': status,
-            'Actual $': actual_mv,
-            'Target $': target_mv,
-            'Rebal $': rebal_amount,
+            'Ticker': t, 'Actual %': actual_w, 'Target %': target, 'Drift %': drift,
+            'Status': status, 'Actual $': row['mv'], 'Target $': target_mv_val, 'Rebal $': rebal,
         })
 
-    # Add tickers in targets but not in portfolio (0% actual)
-    for t, tw_val in target_w.items():
-        if tw_val > 0 and t not in active['ticker'].values:
-            target_mv = total_mv * tw_val / 100
+    # Tickers in targets but not held
+    for t, tw_val in st_targets.items():
+        if tw_val > 0 and t not in sleeve_df['ticker'].values:
+            target_mv_val = sleeve_mv * tw_val / 100
             drift_rows.append({
-                'Ticker': t,
-                'Sleeve': 'ETF' if t in KNOWN_ETFS else 'STOCK',
-                'Actual %': 0,
-                'Target %': tw_val,
-                'Drift %': -tw_val,
-                'Status': 'UW',
-                'Actual $': 0,
-                'Target $': target_mv,
-                'Rebal $': target_mv,
+                'Ticker': t, 'Actual %': 0, 'Target %': tw_val, 'Drift %': -tw_val,
+                'Status': 'UW', 'Actual $': 0, 'Target $': target_mv_val, 'Rebal $': target_mv_val,
             })
 
     drift_df = pd.DataFrame(drift_rows).sort_values('Drift %', key=abs, ascending=False)
 
-    # ─── Side-by-side pie charts ───────────────────
-    pie_t1, pie_t2 = st.columns(2)
-
-    with pie_t1:
-        st.markdown("##### ACTUAL ALLOCATION")
-        actual_alloc = active[['ticker', 'weight']].sort_values('weight', ascending=False)
-        # Add cash if portfolio doesn't sum to ~100%
-        actual_sum = actual_alloc['weight'].sum()
-        fig_actual = go.Figure(data=[go.Pie(
-            labels=actual_alloc['ticker'], values=actual_alloc['weight'],
-            hole=0.5, textinfo='label+percent', textposition='auto',
-            textfont=dict(size=10, color='white', family='Helvetica'),
-            marker=dict(colors=px.colors.qualitative.Set2),
-        )])
-        fig_actual.update_layout(template='plotly_dark', paper_bgcolor='#111', plot_bgcolor='#111',
-                                margin=dict(l=10, r=10, t=10, b=10), height=260, showlegend=False)
-        st.plotly_chart(fig_actual, use_container_width=True)
-
-    with pie_t2:
-        st.markdown("##### TARGET ALLOCATION")
-        target_data = pd.DataFrame([{'ticker': t, 'weight': w} for t, w in target_w.items() if w > 0]).sort_values('weight', ascending=False)
-        if cash_target > 0.5:
-            target_data = pd.concat([target_data, pd.DataFrame([{'ticker': 'CASH', 'weight': cash_target}])], ignore_index=True)
-        if len(target_data) > 0:
-            fig_target = go.Figure(data=[go.Pie(
-                labels=target_data['ticker'], values=target_data['weight'],
+    # Pie charts side by side
+    pc1, pc2 = st.columns(2)
+    with pc1:
+        st.markdown(f"###### ACTUAL ({sleeve_name.upper()})")
+        if len(sleeve_df) > 0:
+            fig_a = go.Figure(data=[go.Pie(
+                labels=sleeve_df['ticker'], values=sleeve_df['mv'],
                 hole=0.5, textinfo='label+percent', textposition='auto',
                 textfont=dict(size=10, color='white', family='Helvetica'),
                 marker=dict(colors=px.colors.qualitative.Set2),
             )])
-            fig_target.update_layout(template='plotly_dark', paper_bgcolor='#111', plot_bgcolor='#111',
-                                    margin=dict(l=10, r=10, t=10, b=10), height=260, showlegend=False)
-            st.plotly_chart(fig_target, use_container_width=True)
+            fig_a.update_layout(template='plotly_dark', paper_bgcolor='#111', plot_bgcolor='#111',
+                               margin=dict(l=5, r=5, t=5, b=5), height=220, showlegend=False)
+            st.plotly_chart(fig_a, use_container_width=True)
 
-    # ─── Drift table ──────────────────────────────
-    st.markdown("##### DRIFT ANALYSIS")
+    with pc2:
+        st.markdown(f"###### TARGET ({sleeve_name.upper()})")
+        tgt_data = pd.DataFrame([{'t': t, 'w': w} for t, w in st_targets.items() if w > 0])
+        if len(tgt_data) > 0:
+            if cash_alloc > 0.5:
+                tgt_data = pd.concat([tgt_data, pd.DataFrame([{'t': 'UNALLOC', 'w': cash_alloc}])], ignore_index=True)
+            fig_t = go.Figure(data=[go.Pie(
+                labels=tgt_data['t'], values=tgt_data['w'],
+                hole=0.5, textinfo='label+percent', textposition='auto',
+                textfont=dict(size=10, color='white', family='Helvetica'),
+                marker=dict(colors=px.colors.qualitative.Set2),
+            )])
+            fig_t.update_layout(template='plotly_dark', paper_bgcolor='#111', plot_bgcolor='#111',
+                               margin=dict(l=5, r=5, t=5, b=5), height=220, showlegend=False)
+            st.plotly_chart(fig_t, use_container_width=True)
 
-    # Summary stats
-    max_ow = drift_df[drift_df['Drift %'] > 0]
-    max_uw = drift_df[drift_df['Drift %'] < 0]
+    # Summary metrics
     total_abs_drift = drift_df['Drift %'].abs().sum()
-    total_rebal = drift_df['Rebal $'].abs().sum()
+    total_rebal_dollars = drift_df['Rebal $'].abs().sum()
+    max_ow_row = drift_df.loc[drift_df['Drift %'].idxmax()] if len(drift_df) > 0 else None
+    max_uw_row = drift_df.loc[drift_df['Drift %'].idxmin()] if len(drift_df) > 0 else None
 
-    dc1, dc2, dc3, dc4 = st.columns(4)
-    with dc1:
-        st.metric("TOTAL ABS DRIFT", f"{total_abs_drift:.1f}%", "Sum of |actual−target|")
-    with dc2:
-        st.metric("TOTAL REBAL $", f"${total_rebal:,.0f}", "Dollar trades needed")
-    with dc3:
-        if len(max_ow) > 0:
-            top_ow = max_ow.iloc[0]
-            st.metric("LARGEST OW", f"{top_ow['Ticker']} +{top_ow['Drift %']:.1f}%")
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    with mc1:
+        st.metric("ABS DRIFT", f"{total_abs_drift:.1f}%")
+    with mc2:
+        st.metric("REBAL $", f"${total_rebal_dollars:,.0f}")
+    with mc3:
+        if max_ow_row is not None and max_ow_row['Drift %'] > 0:
+            st.metric("TOP OW", f"{max_ow_row['Ticker']} +{max_ow_row['Drift %']:.1f}%")
         else:
-            st.metric("LARGEST OW", "\u2014")
-    with dc4:
-        if len(max_uw) > 0:
-            top_uw = max_uw.iloc[-1] if max_uw['Drift %'].iloc[-1] < max_uw['Drift %'].iloc[0] else max_uw.iloc[0]
-            top_uw = drift_df.loc[drift_df['Drift %'].idxmin()]
-            st.metric("LARGEST UW", f"{top_uw['Ticker']} {top_uw['Drift %']:.1f}%")
+            st.metric("TOP OW", "\u2014")
+    with mc4:
+        if max_uw_row is not None and max_uw_row['Drift %'] < 0:
+            st.metric("TOP UW", f"{max_uw_row['Ticker']} {max_uw_row['Drift %']:.1f}%")
         else:
-            st.metric("LARGEST UW", "\u2014")
+            st.metric("TOP UW", "\u2014")
 
-    # Table
+    # Drift table
     st.dataframe(
         drift_df.style.format({
             'Actual %': '{:.1f}%', 'Target %': '{:.1f}%', 'Drift %': '{:+.1f}%',
@@ -934,33 +913,39 @@ if has_targets and total_mv > 0:
             lambda v: 'color: #00d26a' if isinstance(v, (int, float)) and v > 0 else ('color: #ff3b3b' if isinstance(v, (int, float)) and v < 0 else ''),
             subset=['Rebal $']
         ),
-        use_container_width=True, height=min(400, 40 + len(drift_df) * 35)
+        use_container_width=True, height=min(300, 40 + len(drift_df) * 35)
     )
 
-    # Horizontal bar chart of drift
-    st.markdown("##### DRIFT BY POSITION")
-    drift_sorted = drift_df.sort_values('Drift %')
-    fig_drift = go.Figure()
-    fig_drift.add_trace(go.Bar(
-        y=drift_sorted['Ticker'],
-        x=drift_sorted['Drift %'],
-        orientation='h',
-        marker_color=[('#00d26a' if d > 0 else '#ff3b3b') for d in drift_sorted['Drift %']],
-        text=[f"{d:+.1f}%" for d in drift_sorted['Drift %']],
-        textposition='outside',
+    # Horizontal bar chart
+    ds = drift_df.sort_values('Drift %')
+    fig_bar = go.Figure()
+    fig_bar.add_trace(go.Bar(
+        y=ds['Ticker'], x=ds['Drift %'], orientation='h',
+        marker_color=[('#00d26a' if d > 0 else '#ff3b3b') for d in ds['Drift %']],
+        text=[f"{d:+.1f}%" for d in ds['Drift %']], textposition='outside',
         textfont=dict(size=10, color='#e8e8e8'),
     ))
-    fig_drift.add_vline(x=0, line_color='#555', line_width=1)
-    fig_drift.update_layout(
+    fig_bar.add_vline(x=0, line_color='#555', line_width=1)
+    fig_bar.update_layout(
         template='plotly_dark', paper_bgcolor='#111', plot_bgcolor='#111',
-        margin=dict(l=60, r=40, t=10, b=10), height=max(200, len(drift_sorted) * 30),
-        xaxis=dict(title='Drift (Actual − Target) %', gridcolor='#222', zeroline=False),
+        margin=dict(l=60, r=40, t=5, b=5), height=max(150, len(ds) * 28),
+        xaxis=dict(title='Drift %', gridcolor='#222', zeroline=False),
         yaxis=dict(gridcolor='#222'),
     )
-    st.plotly_chart(fig_drift, use_container_width=True)
+    st.plotly_chart(fig_bar, use_container_width=True)
 
-else:
-    st.info("Set target weights above to see drift analysis. Click **EDIT TARGET WEIGHTS** to get started.")
+# ─── Render both sleeves ──────────────────────────
+tw_all = st.session_state.target_weights
+
+sleeve_tab_etf, sleeve_tab_stock = st.tabs(["ETF SLEEVE", "STOCK SLEEVE"])
+
+with sleeve_tab_etf:
+    etf_targets = tw_all.get('etf', {})
+    render_sleeve_drift('etf', etf, etf_targets, etf_mv, '#00bfff')
+
+with sleeve_tab_stock:
+    stock_targets = tw_all.get('stock', {})
+    render_sleeve_drift('stock', stock, stock_targets, stock_mv, '#ffd700')
 
 # ════════════════════════════════════════════════════
 # REBALANCE LOG
