@@ -74,6 +74,7 @@ def save_to_disk():
             'target_weights': st.session_state.get('target_weights', {}),
             'geo_exposure': st.session_state.get('geo_exposure', {}),
             'geo_overrides': st.session_state.get('geo_overrides', {}),
+            'anthropic_api_key': st.session_state.get('anthropic_api_key', ''),
         }
         with open(DATA_FILE, 'w') as f:
             json.dump(export, f, default=str)
@@ -147,6 +148,9 @@ if 'geo_overrides' not in st.session_state:
         st.session_state.geo_overrides = saved['geo_overrides']
     else:
         st.session_state.geo_overrides = {}
+if 'anthropic_api_key' not in st.session_state:
+    if saved and saved.get('anthropic_api_key'):
+        st.session_state.anthropic_api_key = saved['anthropic_api_key']
 
 KNOWN_ETFS = {'SPYM','RSPT','KBWB','PAVE','XBI','XTN','EUAD','AAXJ','SCHP','PPI','XAR',
               'UTES','EWJ','DXJ','EWY','IEMG','SPY','ACWI','QQQ','IWM','VTI','VOO','AGG'}
@@ -975,9 +979,8 @@ if len(country_df) > 0:
         st.caption(f"Unmapped (defaulted to US): {', '.join(unmapped_tickers)}")
 
 
-    # --- Bulk Geo Import ---
+    # --- Geo Import (Image + Text Paste) ---
     with st.expander("IMPORT COUNTRY BREAKDOWNS", expanded=False):
-        st.caption("Paste all tickers at once. Put the ticker on its own line, then the country data below it.")
 
         NAME_TO_ISO = {
             'UNITED STATES': 'USA', 'US': 'USA', 'U.S.': 'USA', 'AMERICA': 'USA',
@@ -1000,9 +1003,9 @@ if len(country_df) > 0:
             'TAIWAN, PROVINCE OF CHINA': 'TWN', 'CHINESE TAIPEI': 'TWN',
         }
 
-        import re
+        import re, base64
 
-        def parse_country_line(text):
+        def parse_country_text(text):
             results = {}
             text = text.replace('\u2014', '').replace('\u2013', '')
             text = re.sub(r'\d{1,2}Not available[^%]*', '', text)
@@ -1022,63 +1025,141 @@ if len(country_df) > 0:
                     iso = NAME_TO_ISO.get(country.strip().upper())
                     if iso and float(pct) > 0:
                         results[iso] = results.get(iso, 0) + float(pct)
-                return results
             return results
 
-        all_known_tickers = set(active['ticker'].tolist())
-
-        st.markdown("**Paste format: ticker on its own line, then country data:**")
-        st.code("EUAD\n1UNITED KINGDOM28.54%2GERMANY24.42%...\nAAXJ\n1CHINA30.12%2INDIA21.52%...", language=None)
-
-        bulk_text = st.text_area(
-            "Paste all tickers + country data",
-            height=200,
-            key='geo_bulk_paste',
-            placeholder="EUAD then country data on next line"
-        )
-
-        if bulk_text and bulk_text.strip():
-            lines_in = bulk_text.strip().split('\n')
-            parsed_all = {}
-            current_ticker = None
-            current_data = ''
-
-            for line_in in lines_in:
-                stripped = line_in.strip().upper()
-                if stripped in all_known_tickers or (len(stripped) <= 5 and stripped.isalpha()):
-                    if current_ticker and current_data:
-                        parsed = parse_country_line(current_data)
-                        if parsed:
-                            parsed_all[current_ticker] = parsed
-                    current_ticker = stripped
-                    current_data = ''
+        def extract_geo_from_image(image_bytes, ticker, api_key):
+            """Use Claude Vision to extract country allocations from a screenshot."""
+            try:
+                import anthropic
+                client = anthropic.Anthropic(api_key=api_key)
+                b64 = base64.b64encode(image_bytes).decode('utf-8')
+                if image_bytes[:4] == b'\x89PNG':
+                    media_type = 'image/png'
+                elif image_bytes[:2] == b'\xff\xd8':
+                    media_type = 'image/jpeg'
                 else:
-                    current_data += ' ' + line_in
+                    media_type = 'image/png'
+                response = client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=1000,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
+                            {"type": "text", "text": (
+                                "This image shows a geographic/country allocation table for ETF or fund ticker " + ticker + ". "
+                                "Extract every country name and its percentage weight from the image. "
+                                "Respond ONLY with a JSON object mapping ISO 3-letter country codes to percentage numbers. "
+                                'Example: {"GBR": 28.48, "DEU": 24.19, "FRA": 16.17} '
+                                "No other text, no markdown backticks. Just the raw JSON object."
+                            )}
+                        ]
+                    }]
+                )
+                raw = response.content[0].text.strip()
+                raw = raw.replace('```json', '').replace('```', '').strip()
+                geo = json.loads(raw)
+                return {k.upper(): round(float(v), 2) for k, v in geo.items() if float(v) > 0}
+            except Exception as e:
+                return str(e)
 
-            if current_ticker and current_data:
-                parsed = parse_country_line(current_data)
-                if parsed:
-                    parsed_all[current_ticker] = parsed
+        all_known_tickers = sorted(set(active['ticker'].tolist()))
 
-            if parsed_all:
-                st.markdown(f"**Parsed {len(parsed_all)} tickers:**")
-                for t, geo in parsed_all.items():
-                    total = sum(geo.values())
-                    top3 = sorted(geo.items(), key=lambda x: -x[1])[:5]
-                    top_str = ', '.join([f"{ISO_TO_NAME.get(k,k)} {v:.1f}%" for k, v in top3])
-                    st.markdown(f"**{t}** (sum {total:.1f}%): {top_str}")
+        # Two tabs: screenshot vs text paste
+        geo_tab_img, geo_tab_text = st.tabs(["SCREENSHOT IMPORT", "TEXT PASTE"])
 
-                if st.button("SAVE ALL GEO", key='save_geo_bulk'):
-                    geo_ov = st.session_state.get('geo_overrides', {})
-                    for t, geo in parsed_all.items():
-                        geo_ov[t] = {k: round(v, 2) for k, v in geo.items()}
-                    st.session_state.geo_overrides = geo_ov
+        with geo_tab_img:
+            st.caption("Upload a screenshot of the country allocation (Vanguard, iShares, FactSet, etc). Claude Vision reads it automatically.")
+
+            api_key = st.session_state.get('anthropic_api_key', '')
+            if not api_key:
+                api_key = st.text_input("Anthropic API Key", type="password", key='geo_api_key_input',
+                                       help="Get a free key at console.anthropic.com")
+                if api_key:
+                    st.session_state.anthropic_api_key = api_key
                     save_to_disk()
-                    st.success(f"Saved geo for {', '.join(parsed_all.keys())}")
-                    st.rerun()
-            else:
-                st.warning("Could not parse. Check format.")
 
+            img_ticker = st.selectbox("Which ticker is this for?", all_known_tickers, key='geo_img_ticker')
+            uploaded_img = st.file_uploader("Upload screenshot", type=['png', 'jpg', 'jpeg'], key='geo_img_upload')
+
+            if uploaded_img and api_key and img_ticker:
+                st.image(uploaded_img, caption=img_ticker + " country allocation", width=400)
+                if st.button("EXTRACT COUNTRIES FROM IMAGE", key='extract_geo_img'):
+                    with st.spinner("Claude is reading the image..."):
+                        result = extract_geo_from_image(uploaded_img.getvalue(), img_ticker, api_key)
+                    if isinstance(result, dict):
+                        total = sum(result.values())
+                        st.success(f"Extracted {len(result)} countries for {img_ticker} (sum: {total:.1f}%)")
+                        for iso, pct in sorted(result.items(), key=lambda x: -x[1]):
+                            st.markdown(f"- {ISO_TO_NAME.get(iso, iso)} ({iso}): **{pct}%**")
+                        # Store in temp state for save button
+                        st.session_state['_geo_img_result'] = {img_ticker: result}
+                    else:
+                        st.error(f"Extraction failed: {result}")
+
+                # Save button (separate from extract to avoid re-running vision)
+                pending = st.session_state.get('_geo_img_result', {})
+                if pending and img_ticker in pending:
+                    if st.button(f"SAVE {img_ticker} GEO DATA", key='save_geo_img'):
+                        geo_ov = st.session_state.get('geo_overrides', {})
+                        geo_ov[img_ticker] = pending[img_ticker]
+                        st.session_state.geo_overrides = geo_ov
+                        del st.session_state['_geo_img_result']
+                        save_to_disk()
+                        st.success(f"Saved {img_ticker} geo data!")
+                        st.rerun()
+
+            elif not api_key:
+                st.info("Enter your Anthropic API key above. Get one free at console.anthropic.com")
+
+        with geo_tab_text:
+            st.caption("Paste ticker on its own line, then country data below. Repeat for multiple tickers.")
+            bulk_text = st.text_area(
+                "Paste all tickers + country data",
+                height=200,
+                key='geo_bulk_paste',
+                placeholder="EUAD\n1UNITED KINGDOM28.54%2GERMANY24.42%..."
+            )
+            if bulk_text and bulk_text.strip():
+                lines_in = bulk_text.strip().split('\n')
+                parsed_all = {}
+                current_ticker = None
+                current_data = ''
+                known_set = set(all_known_tickers)
+                for line_in in lines_in:
+                    stripped = line_in.strip().upper()
+                    if stripped in known_set or (len(stripped) <= 5 and stripped.isalpha()):
+                        if current_ticker and current_data:
+                            parsed = parse_country_text(current_data)
+                            if parsed:
+                                parsed_all[current_ticker] = parsed
+                        current_ticker = stripped
+                        current_data = ''
+                    else:
+                        current_data += ' ' + line_in
+                if current_ticker and current_data:
+                    parsed = parse_country_text(current_data)
+                    if parsed:
+                        parsed_all[current_ticker] = parsed
+                if parsed_all:
+                    st.markdown(f"**Parsed {len(parsed_all)} tickers:**")
+                    for t, geo in parsed_all.items():
+                        total = sum(geo.values())
+                        top5 = sorted(geo.items(), key=lambda x: -x[1])[:5]
+                        top_str = ', '.join([f"{ISO_TO_NAME.get(k,k)} {v:.1f}%" for k, v in top5])
+                        st.markdown(f"**{t}** (sum {total:.1f}%): {top_str}")
+                    if st.button("SAVE ALL GEO", key='save_geo_bulk'):
+                        geo_ov = st.session_state.get('geo_overrides', {})
+                        for t, geo in parsed_all.items():
+                            geo_ov[t] = {k: round(v, 2) for k, v in geo.items()}
+                        st.session_state.geo_overrides = geo_ov
+                        save_to_disk()
+                        st.success(f"Saved geo for {', '.join(parsed_all.keys())}")
+                        st.rerun()
+                else:
+                    st.warning("Could not parse. Put ticker on its own line, then the data below it.")
+
+        # Show saved overrides
         geo_overrides = st.session_state.get('geo_overrides', {})
         if geo_overrides:
             st.markdown("---")
@@ -1091,7 +1172,6 @@ if len(country_df) > 0:
                 st.session_state.geo_overrides = {}
                 save_to_disk()
                 st.rerun()
-
 
 # ════════════════════════════════════════════════════
 # LIVE PRICES PANEL
