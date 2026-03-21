@@ -974,14 +974,14 @@ if len(country_df) > 0:
     if unmapped_tickers:
         st.caption(f"Unmapped (defaulted to US): {', '.join(unmapped_tickers)}")
 
-    # ─── Editable Geo Overrides ───────────────────
-    with st.expander("IMPORT COUNTRY BREAKDOWNS", expanded=False):
-        st.caption("Paste country allocation data from fund fact sheets, FactSet, or iShares. The parser auto-detects country names and percentages.")
 
-        # Country name → ISO mapping
+    # --- Bulk Geo Import ---
+    with st.expander("IMPORT COUNTRY BREAKDOWNS", expanded=False):
+        st.caption("Paste all tickers at once. Put the ticker on its own line, then the country data below it.")
+
         NAME_TO_ISO = {
             'UNITED STATES': 'USA', 'US': 'USA', 'U.S.': 'USA', 'AMERICA': 'USA',
-            'UNITED KINGDOM': 'GBR', 'UK': 'GBR', 'GREAT BRITAIN': 'GBR', 'BRITAIN': 'GBR', 'ENGLAND': 'GBR',
+            'UNITED KINGDOM': 'GBR', 'UK': 'GBR', 'GREAT BRITAIN': 'GBR', 'BRITAIN': 'GBR',
             'GERMANY': 'DEU', 'FRANCE': 'FRA', 'SWITZERLAND': 'CHE', 'NETHERLANDS': 'NLD', 'HOLLAND': 'NLD',
             'SWEDEN': 'SWE', 'ITALY': 'ITA', 'SPAIN': 'ESP', 'DENMARK': 'DNK', 'FINLAND': 'FIN',
             'BELGIUM': 'BEL', 'NORWAY': 'NOR', 'AUSTRIA': 'AUT', 'IRELAND': 'IRL', 'PORTUGAL': 'PRT',
@@ -994,118 +994,104 @@ if len(country_df) > 0:
             'SOUTH AFRICA': 'ZAF', 'SAUDI ARABIA': 'SAU', 'UNITED ARAB EMIRATES': 'ARE', 'UAE': 'ARE',
             'QATAR': 'QAT', 'KUWAIT': 'KWT', 'TURKEY': 'TUR', 'ISRAEL': 'ISR', 'EGYPT': 'EGY',
             'RUSSIA': 'RUS', 'CANADA': 'CAN', 'NIGERIA': 'NGA', 'KENYA': 'KEN',
-            'CAYMAN ISLANDS': 'CYM', 'BERMUDA': 'BMU', 'JERSEY': 'JEY', 'GUERNSEY': 'GGY',
-            'REPUBLIC OF KOREA': 'KOR', 'KOREA, REPUBLIC OF': 'KOR', 'KOREA (SOUTH)': 'KOR',
+            'CAYMAN ISLANDS': 'CYM', 'BERMUDA': 'BMU',
+            'REPUBLIC OF KOREA': 'KOR', 'KOREA, REPUBLIC OF': 'KOR',
             'CHINA - MAINLAND': 'CHN', 'PEOPLES REPUBLIC OF CHINA': 'CHN',
             'TAIWAN, PROVINCE OF CHINA': 'TWN', 'CHINESE TAIPEI': 'TWN',
         }
 
         import re
 
-        def parse_geo_paste(text):
-            """Parse various formats of country allocation data"""
+        def parse_country_line(text):
             results = {}
-            # Clean up
-            text = text.replace('\u2014', '').replace('—', '').replace('–', '').replace('\t', ' ')
-            # Remove "Not available" entries and footer text
+            text = text.replace('\u2014', '').replace('\u2013', '')
             text = re.sub(r'\d{1,2}Not available[^%]*', '', text)
             text = re.sub(r'%\s*of total.*', '', text, flags=re.IGNORECASE)
-            text = re.sub(r'as of.*?\d{4}\)?', '', text, flags=re.IGNORECASE)
-
-            lines = [l.strip() for l in text.split('\n') if l.strip()]
-
-            for line in lines:
-                # Pattern 1: "1UNITED KINGDOM28.54%" — continuous ranked format
-                # Don't capture rank, just country name + pct
-                matches = re.findall(r'\d{1,2}([A-Z][A-Za-z\s\-\.]+?)([\d\.]+)%', line)
-                if matches:
-                    for country, pct in matches:
-                        country = country.strip()
-                        iso = NAME_TO_ISO.get(country.upper())
-                        if iso and float(pct) > 0:
-                            results[iso] = results.get(iso, 0) + float(pct)
-                    continue
-
-                # Pattern 2: "UNITED KINGDOM  28.54%" — tabular/spaced format
-                matches = re.findall(r'([A-Za-z][A-Za-z\s\-\.]+?)\s{2,}([\d\.]+)%?', line)
-                if not matches:
-                    matches = re.findall(r'([A-Za-z][A-Za-z\s\-\.]{2,}?)\s+([\d\.]+)%', line)
-                if matches:
-                    for country, pct in matches:
-                        country = country.strip()
-                        iso = NAME_TO_ISO.get(country.upper())
-                        if iso and float(pct) > 0:
-                            results[iso] = results.get(iso, 0) + float(pct)
-                    continue
-
-                # Pattern 3: "GBR:28.54, DEU:24.42" — ISO code format
-                if ':' in line:
-                    pairs = [p.strip() for p in line.split(',') if ':' in p]
-                    for pair in pairs:
-                        parts = pair.split(':')
-                        if len(parts) == 2:
-                            code = parts[0].strip().upper()
-                            try:
-                                val = float(parts[1].strip().replace('%', ''))
-                                if val > 0:
-                                    results[code] = results.get(code, 0) + val
-                            except:
-                                pass
-
+            text = re.sub(r'\(as of[^)]*\)', '', text, flags=re.IGNORECASE)
+            text = re.sub(r'as of.*?\d{4}', '', text, flags=re.IGNORECASE)
+            matches = re.findall(r'\d{1,2}([A-Z][A-Za-z\s\-\.]+?)([\d\.]+)%', text)
+            if matches:
+                for country, pct in matches:
+                    iso = NAME_TO_ISO.get(country.strip().upper())
+                    if iso and float(pct) > 0:
+                        results[iso] = results.get(iso, 0) + float(pct)
+                return results
+            matches = re.findall(r'([A-Za-z][A-Za-z\s\-\.]+?)\s+([\d\.]+)%', text)
+            if matches:
+                for country, pct in matches:
+                    iso = NAME_TO_ISO.get(country.strip().upper())
+                    if iso and float(pct) > 0:
+                        results[iso] = results.get(iso, 0) + float(pct)
+                return results
             return results
 
-        geo_overrides = st.session_state.get('geo_overrides', {})
-        active_tickers = active['ticker'].tolist()
+        all_known_tickers = set(active['ticker'].tolist())
 
-        edit_ticker = st.selectbox("Select ticker", active_tickers, key='geo_edit_ticker')
+        st.markdown("**Paste format: ticker on its own line, then country data:**")
+        st.code("EUAD\n1UNITED KINGDOM28.54%2GERMANY24.42%...\nAAXJ\n1CHINA30.12%2INDIA21.52%...", language=None)
 
-        if edit_ticker:
-            current_geo = geo_overrides.get(edit_ticker) or GEO_MAP.get(edit_ticker, {'USA': 100})
-            current_str = ', '.join([f"{ISO_TO_NAME.get(k,k)} ({k}): {v}%" for k, v in sorted(current_geo.items(), key=lambda x: -x[1])])
-            st.caption(f"**Current:** {current_str}")
+        bulk_text = st.text_area(
+            "Paste all tickers + country data",
+            height=200,
+            key='geo_bulk_paste',
+            placeholder="EUAD then country data on next line"
+        )
 
-            paste_text = st.text_area(
-                "Paste country allocation data below",
-                height=120,
-                placeholder="Paste from fund fact sheet, e.g.:\n1UNITED KINGDOM28.54%2GERMANY24.42%3FRANCE16.08%\n\nOr manual format:\nUSA:60, GBR:10, FRA:10",
-                key=f'geo_paste_{edit_ticker}'
-            )
+        if bulk_text and bulk_text.strip():
+            lines_in = bulk_text.strip().split('\n')
+            parsed_all = {}
+            current_ticker = None
+            current_data = ''
 
-            if paste_text:
-                parsed = parse_geo_paste(paste_text)
-                if parsed:
-                    total = sum(parsed.values())
-                    st.markdown("**Parsed:**")
-                    parsed_display = pd.DataFrame([
-                        {'Country': ISO_TO_NAME.get(k, k), 'ISO': k, 'Weight %': v}
-                        for k, v in sorted(parsed.items(), key=lambda x: -x[1])
-                    ])
-                    st.dataframe(parsed_display.style.format({'Weight %': '{:.2f}%'}), use_container_width=True, height=min(250, 40 + len(parsed_display) * 30))
-
-                    color = '#00d26a' if abs(total - 100) < 1.5 else '#ffd700'
-                    st.markdown(f'<span style="color:{color}">Sum: {total:.2f}%</span>', unsafe_allow_html=True)
-
-                    if st.button(f"SAVE {edit_ticker} GEO", key='save_geo'):
-                        geo_overrides[edit_ticker] = {k: round(v, 2) for k, v in parsed.items()}
-                        st.session_state.geo_overrides = geo_overrides
-                        save_to_disk()
-                        st.success(f"Saved {edit_ticker}")
-                        st.rerun()
+            for line_in in lines_in:
+                stripped = line_in.strip().upper()
+                if stripped in all_known_tickers or (len(stripped) <= 5 and stripped.isalpha()):
+                    if current_ticker and current_data:
+                        parsed = parse_country_line(current_data)
+                        if parsed:
+                            parsed_all[current_ticker] = parsed
+                    current_ticker = stripped
+                    current_data = ''
                 else:
-                    st.warning("Could not parse any country data. Check the format.")
+                    current_data += ' ' + line_in
 
-        # Show all current overrides
+            if current_ticker and current_data:
+                parsed = parse_country_line(current_data)
+                if parsed:
+                    parsed_all[current_ticker] = parsed
+
+            if parsed_all:
+                st.markdown(f"**Parsed {len(parsed_all)} tickers:**")
+                for t, geo in parsed_all.items():
+                    total = sum(geo.values())
+                    top3 = sorted(geo.items(), key=lambda x: -x[1])[:5]
+                    top_str = ', '.join([f"{ISO_TO_NAME.get(k,k)} {v:.1f}%" for k, v in top3])
+                    st.markdown(f"**{t}** (sum {total:.1f}%): {top_str}")
+
+                if st.button("SAVE ALL GEO", key='save_geo_bulk'):
+                    geo_ov = st.session_state.get('geo_overrides', {})
+                    for t, geo in parsed_all.items():
+                        geo_ov[t] = {k: round(v, 2) for k, v in geo.items()}
+                    st.session_state.geo_overrides = geo_ov
+                    save_to_disk()
+                    st.success(f"Saved geo for {', '.join(parsed_all.keys())}")
+                    st.rerun()
+            else:
+                st.warning("Could not parse. Check format.")
+
+        geo_overrides = st.session_state.get('geo_overrides', {})
         if geo_overrides:
             st.markdown("---")
             st.markdown("**Saved overrides:**")
             for t, geo in sorted(geo_overrides.items()):
                 top3 = sorted(geo.items(), key=lambda x: -x[1])[:3]
                 top_str = ', '.join([f"{ISO_TO_NAME.get(k,k)} {v}%" for k, v in top3])
-                st.caption(f"**{t}**: {top_str}{'...' if len(geo) > 3 else ''}")
+                st.caption(f"**{t}**: {top_str}")
             if st.button("CLEAR ALL OVERRIDES", key='clear_geo'):
                 st.session_state.geo_overrides = {}
                 save_to_disk()
                 st.rerun()
+
 
 # ════════════════════════════════════════════════════
 # LIVE PRICES PANEL
@@ -1145,28 +1131,50 @@ def render_sleeve_drift(sleeve_name, sleeve_df, sleeve_targets, sleeve_mv, color
 
     has_targets = any(v > 0 for v in st_targets.values())
 
-    # Editor
+    # Editor — paste from Excel or type manually
     with st.expander(f"EDIT {sleeve_name.upper()} TARGETS", expanded=False):
-        st.caption(f"Enter target weight (%) for each position within the {sleeve_name} sleeve. Should sum to 100% of the sleeve.")
-        n_cols = min(4, max(1, len(st_targets)))
-        tw_cols = st.columns(n_cols)
-        updated = {}
-        for i, ticker in enumerate(sorted(st_targets.keys())):
-            with tw_cols[i % n_cols]:
-                val = st.number_input(
-                    ticker, value=float(st_targets.get(ticker, 0)),
-                    min_value=0.0, max_value=100.0, step=0.5,
-                    key=f'tw_{sleeve_name}_{ticker}'
-                )
-                updated[ticker] = val
+        st.caption("Paste from Excel: two columns (Ticker, Weight %). Tab, comma, or space separated. One row per ticker.")
 
-        tw_sum = sum(updated.values())
+        # Show current targets
+        current_str = '\n'.join([f"{t}\t{w}" for t, w in sorted(st_targets.items()) if w > 0])
+        if not current_str:
+            current_str = '\n'.join([f"{t}\t0" for t in sorted(tickers_in_sleeve)])
+
+        paste_text = st.text_area(
+            "Paste targets (Ticker  Weight)",
+            value=current_str,
+            height=min(200, 30 + len(st_targets) * 22),
+            key=f'tw_paste_{sleeve_name}',
+            placeholder="RSPT\t15\nPAVE\t12\nSPYM\t10"
+        )
+
+        # Parse
+        parsed_targets = {}
+        if paste_text:
+            for line in paste_text.strip().split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                # Split by tab, comma, or multiple spaces
+                import re as re_tw
+                parts = re_tw.split(r'[\t,]+|\s{2,}', line)
+                if len(parts) < 2:
+                    parts = line.split()
+                if len(parts) >= 2:
+                    ticker = parts[0].strip().upper()
+                    try:
+                        weight = float(parts[1].strip().replace('%', ''))
+                        parsed_targets[ticker] = weight
+                    except:
+                        pass
+
+        tw_sum = sum(parsed_targets.values())
         cash_alloc = max(0, 100 - tw_sum)
         st.caption(f"Sum: {tw_sum:.1f}% | Unallocated: {cash_alloc:.1f}%")
 
         if st.button(f"SAVE {sleeve_name.upper()} TARGETS", key=f'save_tw_{sleeve_name}'):
             tw_all = st.session_state.target_weights.copy()
-            tw_all[sleeve_name] = updated
+            tw_all[sleeve_name] = parsed_targets
             st.session_state.target_weights = tw_all
             save_to_disk()
             st.success(f"{sleeve_name} targets saved")
