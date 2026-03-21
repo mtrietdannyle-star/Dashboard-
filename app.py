@@ -74,7 +74,6 @@ def save_to_disk():
             'target_weights': st.session_state.get('target_weights', {}),
             'geo_exposure': st.session_state.get('geo_exposure', {}),
             'geo_overrides': st.session_state.get('geo_overrides', {}),
-            'anthropic_api_key': st.session_state.get('anthropic_api_key', ''),
         }
         with open(DATA_FILE, 'w') as f:
             json.dump(export, f, default=str)
@@ -148,9 +147,6 @@ if 'geo_overrides' not in st.session_state:
         st.session_state.geo_overrides = saved['geo_overrides']
     else:
         st.session_state.geo_overrides = {}
-if 'anthropic_api_key' not in st.session_state:
-    if saved and saved.get('anthropic_api_key'):
-        st.session_state.anthropic_api_key = saved['anthropic_api_key']
 
 KNOWN_ETFS = {'SPYM','RSPT','KBWB','PAVE','XBI','XTN','EUAD','AAXJ','SCHP','PPI','XAR',
               'UTES','EWJ','DXJ','EWY','IEMG','SPY','ACWI','QQQ','IWM','VTI','VOO','AGG'}
@@ -1003,7 +999,7 @@ if len(country_df) > 0:
             'TAIWAN, PROVINCE OF CHINA': 'TWN', 'CHINESE TAIPEI': 'TWN',
         }
 
-        import re, base64
+        import re
 
         def parse_country_text(text):
             results = {}
@@ -1027,41 +1023,41 @@ if len(country_df) > 0:
                         results[iso] = results.get(iso, 0) + float(pct)
             return results
 
-        def extract_geo_from_image(image_bytes, ticker, api_key):
-            """Use Claude Vision to extract country allocations from a screenshot."""
+        def extract_geo_from_image(image_bytes):
+            """Use Tesseract OCR to extract country allocations from a screenshot."""
             try:
-                import anthropic
-                client = anthropic.Anthropic(api_key=api_key)
-                b64 = base64.b64encode(image_bytes).decode('utf-8')
-                if image_bytes[:4] == b'\x89PNG':
-                    media_type = 'image/png'
-                elif image_bytes[:2] == b'\xff\xd8':
-                    media_type = 'image/jpeg'
-                else:
-                    media_type = 'image/png'
-                response = client.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=1000,
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
-                            {"type": "text", "text": (
-                                "This image shows a geographic/country allocation table for ETF or fund ticker " + ticker + ". "
-                                "Extract every country name and its percentage weight from the image. "
-                                "Respond ONLY with a JSON object mapping ISO 3-letter country codes to percentage numbers. "
-                                'Example: {"GBR": 28.48, "DEU": 24.19, "FRA": 16.17} '
-                                "No other text, no markdown backticks. Just the raw JSON object."
-                            )}
-                        ]
-                    }]
-                )
-                raw = response.content[0].text.strip()
-                raw = raw.replace('```json', '').replace('```', '').strip()
-                geo = json.loads(raw)
-                return {k.upper(): round(float(v), 2) for k, v in geo.items() if float(v) > 0}
+                from PIL import Image
+                import pytesseract
+                img = Image.open(io.BytesIO(image_bytes))
+                # OCR the image
+                raw_text = pytesseract.image_to_string(img)
+                # Parse the OCR text for country + percentage patterns
+                results = {}
+                # Pattern: "UNITED KINGDOM" followed by a number like "28.48%"
+                for line in raw_text.split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # Try: "COUNTRY_NAME  28.48%" or "COUNTRY_NAME 28.48"
+                    match = re.search(r'([A-Za-z][A-Za-z\s\-\.]+?)\s+([\d]+\.[\d]+)\s*%?', line)
+                    if match:
+                        country = match.group(1).strip()
+                        pct = float(match.group(2))
+                        if pct > 0 and pct <= 100:
+                            iso = NAME_TO_ISO.get(country.upper())
+                            if iso:
+                                results[iso] = results.get(iso, 0) + pct
+                # Also try the continuous format in full OCR text
+                if not results:
+                    full = raw_text.replace('\n', ' ')
+                    matches = re.findall(r'\d{1,2}\s*([A-Z][A-Za-z\s\-\.]+?)\s*([\d\.]+)\s*%', full)
+                    for country, pct in matches:
+                        iso = NAME_TO_ISO.get(country.strip().upper())
+                        if iso and float(pct) > 0:
+                            results[iso] = results.get(iso, 0) + float(pct)
+                return results, raw_text
             except Exception as e:
-                return str(e)
+                return {}, str(e)
 
         all_known_tickers = sorted(set(active['ticker'].tolist()))
 
@@ -1069,35 +1065,31 @@ if len(country_df) > 0:
         geo_tab_img, geo_tab_text = st.tabs(["SCREENSHOT IMPORT", "TEXT PASTE"])
 
         with geo_tab_img:
-            st.caption("Upload a screenshot of the country allocation (Vanguard, iShares, FactSet, etc). Claude Vision reads it automatically.")
-
-            api_key = st.session_state.get('anthropic_api_key', '')
-            if not api_key:
-                api_key = st.text_input("Anthropic API Key", type="password", key='geo_api_key_input',
-                                       help="Get a free key at console.anthropic.com")
-                if api_key:
-                    st.session_state.anthropic_api_key = api_key
-                    save_to_disk()
+            st.caption("Upload a screenshot of the country allocation (Vanguard, iShares, FactSet, etc). Free OCR extracts the data automatically.")
 
             img_ticker = st.selectbox("Which ticker is this for?", all_known_tickers, key='geo_img_ticker')
             uploaded_img = st.file_uploader("Upload screenshot", type=['png', 'jpg', 'jpeg'], key='geo_img_upload')
 
-            if uploaded_img and api_key and img_ticker:
+            if uploaded_img and img_ticker:
                 st.image(uploaded_img, caption=img_ticker + " country allocation", width=400)
                 if st.button("EXTRACT COUNTRIES FROM IMAGE", key='extract_geo_img'):
-                    with st.spinner("Claude is reading the image..."):
-                        result = extract_geo_from_image(uploaded_img.getvalue(), img_ticker, api_key)
-                    if isinstance(result, dict):
+                    with st.spinner("Reading image with OCR..."):
+                        result, raw_text = extract_geo_from_image(uploaded_img.getvalue())
+                    if result and len(result) > 0:
                         total = sum(result.values())
                         st.success(f"Extracted {len(result)} countries for {img_ticker} (sum: {total:.1f}%)")
                         for iso, pct in sorted(result.items(), key=lambda x: -x[1]):
                             st.markdown(f"- {ISO_TO_NAME.get(iso, iso)} ({iso}): **{pct}%**")
-                        # Store in temp state for save button
                         st.session_state['_geo_img_result'] = {img_ticker: result}
+                        with st.expander("OCR raw text (for debugging)", expanded=False):
+                            st.text(raw_text)
                     else:
-                        st.error(f"Extraction failed: {result}")
+                        st.warning("OCR could not extract country data. Try the TEXT PASTE tab instead, or make sure the screenshot clearly shows country names and percentages.")
+                        if raw_text:
+                            with st.expander("OCR raw text (for debugging)", expanded=False):
+                                st.text(raw_text)
 
-                # Save button (separate from extract to avoid re-running vision)
+                # Save button
                 pending = st.session_state.get('_geo_img_result', {})
                 if pending and img_ticker in pending:
                     if st.button(f"SAVE {img_ticker} GEO DATA", key='save_geo_img'):
@@ -1108,9 +1100,6 @@ if len(country_df) > 0:
                         save_to_disk()
                         st.success(f"Saved {img_ticker} geo data!")
                         st.rerun()
-
-            elif not api_key:
-                st.info("Enter your Anthropic API key above. Get one free at console.anthropic.com")
 
         with geo_tab_text:
             st.caption("Paste ticker on its own line, then country data below. Repeat for multiple tickers.")
