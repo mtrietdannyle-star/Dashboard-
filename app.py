@@ -745,7 +745,7 @@ def show_holdings(df):
             'Mkt Value': '${:,.2f}', 'Weight %': '{:.1f}%', 'Day Chg %': '{:+.2f}%',
             'Day P&L': '${:+,.2f}', 'Total Rtn %': '{:+.2f}%', 'Total P&L': '${:+,.2f}',
             'Attrib %': '{:+.3f}%', 'Beta': '{:.2f}', 'CTR %': '{:+.3f}%', 'PCR %': '{:.1f}%',
-        }).applymap(lambda v: 'color: #00d26a' if isinstance(v, (int, float)) and v > 0 else ('color: #ff3b3b' if isinstance(v, (int, float)) and v < 0 else ''),
+        }).map(lambda v: 'color: #00d26a' if isinstance(v, (int, float)) and v > 0 else ('color: #ff3b3b' if isinstance(v, (int, float)) and v < 0 else ''),
                    subset=['Day Chg %', 'Day P&L', 'Total Rtn %', 'Total P&L', 'Attrib %']),
         use_container_width=True, height=min(400, 40 + len(display) * 35)
     )
@@ -1178,7 +1178,7 @@ with st.expander("LIVE PRICES", expanded=False):
         price_rows.append({'Ticker': row['ticker'], 'Type': row['sleeve'].upper(),
                           'Price': q.get('price', 0), 'Chg %': q.get('changePct', 0)})
     pdf = pd.DataFrame(price_rows)
-    st.dataframe(pdf.style.format({'Price': '${:.2f}', 'Chg %': '{:+.2f}%'}).applymap(
+    st.dataframe(pdf.style.format({'Price': '${:.2f}', 'Chg %': '{:+.2f}%'}).map(
         lambda v: 'color: #00d26a' if isinstance(v, (int, float)) and v > 0 else ('color: #ff3b3b' if isinstance(v, (int, float)) and v < 0 else ''),
         subset=['Chg %']), use_container_width=True)
 
@@ -1337,13 +1337,13 @@ def render_sleeve_drift(sleeve_name, sleeve_df, sleeve_targets, sleeve_mv, color
         drift_df.style.format({
             'Actual %': '{:.1f}%', 'Target %': '{:.1f}%', 'Drift %': '{:+.1f}%',
             'Actual $': '${:,.2f}', 'Target $': '${:,.2f}', 'Rebal $': '${:+,.2f}',
-        }).applymap(
+        }).map(
             lambda v: 'color: #00d26a; font-weight: 700' if v == 'OW' else ('color: #ff3b3b; font-weight: 700' if v == 'UW' else 'color: #555'),
             subset=['Status']
-        ).applymap(
+        ).map(
             lambda v: 'color: #00d26a' if isinstance(v, (int, float)) and v > 0.5 else ('color: #ff3b3b' if isinstance(v, (int, float)) and v < -0.5 else ''),
             subset=['Drift %']
-        ).applymap(
+        ).map(
             lambda v: 'color: #00d26a' if isinstance(v, (int, float)) and v > 0 else ('color: #ff3b3b' if isinstance(v, (int, float)) and v < 0 else ''),
             subset=['Rebal $']
         ),
@@ -1462,7 +1462,7 @@ if len(st.session_state.rebalances) > 0:
     st.dataframe(
         rebal[['date', 'action', 'ticker', 'shares', 'price', 'notional', 'notes']].style.format({
             'shares': '{:.4f}', 'price': '${:.2f}', 'notional': '${:,.2f}'
-        }).applymap(lambda v: 'color: #00d26a' if v in ['BUY', 'ADD'] else ('color: #ff3b3b' if v in ['SELL', 'TRIM'] else ''),
+        }).map(lambda v: 'color: #00d26a' if v in ['BUY', 'ADD'] else ('color: #ff3b3b' if v in ['SELL', 'TRIM'] else ''),
                    subset=['action']),
         use_container_width=True, height=min(300, 40 + len(rebal) * 35)
     )
