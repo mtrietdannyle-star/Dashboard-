@@ -651,7 +651,7 @@ if not hist.empty and len(hist) >= 2:
     for _, row in active.iterrows():
         t = row['ticker']
         if t in hist.columns:
-            port_val += row['shares'] * hist[t].fillna(method='ffill').fillna(row['avgCost'])
+            port_val += row['shares'] *hist[t].ffill().fillna(row['avgCost'])
         else:
             port_val += row['shares'] * row['avgCost']
 
