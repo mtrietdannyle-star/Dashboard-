@@ -661,7 +661,7 @@ if not hist.empty and len(hist) >= 2:
         t = c['ticker']
         w = c['weight'] / total_bm_weight if total_bm_weight > 0 else 0
         if t in hist.columns:
-            bm_val += w * hist[t].ffill())
+            bm_val += w * hist[t].ffill()
 
     # Cumulative returns
     port_ret = ((port_val / port_val.iloc[0]) - 1) * 100
