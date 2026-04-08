@@ -149,7 +149,10 @@ if 'geo_overrides' not in st.session_state:
         st.session_state.geo_overrides = {}
 
 KNOWN_ETFS = {'SPYM','RSPT','KBWB','PAVE','XBI','XTN','EUAD','AAXJ','SCHP','PPI','XAR',
-              'UTES','EWJ','DXJ','EWY','IEMG','SPY','ACWI','QQQ','IWM','VTI','VOO','AGG'}
+              'UTES','EWJ','DXJ','EWY','IEMG','SPY','ACWI','QQQ','IWM','VTI','VOO','AGG',
+              'CERY','SHLD','HACK','CIBR','FITE','SPDW','IGV','SOXX','SMH','XLK','XLF',
+              'XLE','XLV','XLI','XLU','XLRE','XLC','XLY','XLP','XLB','GLD','SLV','TLT',
+              'HYG','LQD','EMB','BNDX','SCHD','JEPI','JEPQ','ARKK','ARKW','DFEN','ITA'}
 
 # ════════════════════════════════════════════════════
 # SCHWAB CSV PARSER
@@ -773,6 +776,25 @@ with tab_etf:
 with tab_stock:
     st.caption(f"Weights relative to Stock sleeve (${stock_mv:,.2f})")
     show_holdings(stock, stock_mv)  # weight relative to Stock sleeve only
+
+# Sleeve toggle
+with st.expander("FIX SLEEVE CLASSIFICATION", expanded=False):
+    st.caption("Toggle any ticker between ETF and Stock sleeve.")
+    pos = st.session_state.positions
+    if len(pos) > 0:
+        toggle_cols = st.columns(min(6, len(pos)))
+        changed = False
+        for i, (idx, row) in enumerate(pos.iterrows()):
+            with toggle_cols[i % min(6, len(pos))]:
+                current = row.get('sleeve', 'etf')
+                label = f"{row['ticker']} ({current.upper()})"
+                if st.button(label, key=f'sleeve_toggle_{row["ticker"]}'):
+                    new_sleeve = 'stock' if current == 'etf' else 'etf'
+                    st.session_state.positions.at[idx, 'sleeve'] = new_sleeve
+                    changed = True
+        if changed:
+            save_to_disk()
+            st.rerun()
 
 # ════════════════════════════════════════════════════
 # SLEEVE BREAKDOWN
