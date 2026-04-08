@@ -651,7 +651,7 @@ if not hist.empty and len(hist) >= 2:
     for _, row in active.iterrows():
         t = row['ticker']
         if t in hist.columns:
-            port_val += row['shares'] *hist[t].ffill().fillna(row['avgCost'])
+            port_val += row['shares'] * hist[t].fillna(method='ffill').fillna(row['avgCost'])
         else:
             port_val += row['shares'] * row['avgCost']
 
@@ -661,7 +661,7 @@ if not hist.empty and len(hist) >= 2:
         t = c['ticker']
         w = c['weight'] / total_bm_weight if total_bm_weight > 0 else 0
         if t in hist.columns:
-            bm_val += w * hist[t].ffill()
+            bm_val += w * hist[t].fillna(method='ffill')
 
     # Cumulative returns
     port_ret = ((port_val / port_val.iloc[0]) - 1) * 100
@@ -727,15 +727,30 @@ with pie_col2:
 # ════════════════════════════════════════════════════
 # HOLDINGS TABLE
 # ════════════════════════════════════════════════════
+# Cash calculation: Deposits + Realized P&L + Dividends - Current Cost Basis
+cash_balance = total_deposits + realized_pnl + total_dividends - total_cost
+net_liq = total_mv + cash_balance
+
 st.markdown("#### HOLDINGS")
+cash_col1, cash_col2, cash_col3 = st.columns(3)
+with cash_col1:
+    st.metric("NET LIQUIDATION", f"${net_liq:,.2f}")
+with cash_col2:
+    st.metric("CASH AVAILABLE", f"${cash_balance:,.2f}", f"{(cash_balance/net_liq*100) if net_liq>0 else 0:.1f}% of net liq")
+with cash_col3:
+    st.metric("INVESTED", f"${total_mv:,.2f}", f"{(total_mv/net_liq*100) if net_liq>0 else 0:.1f}% of net liq")
 
 tab_all, tab_etf, tab_stock = st.tabs(["ALL", "ETF", "STOCK"])
 
-def show_holdings(df):
+def show_holdings(df, relative_mv=None):
+    """Show holdings table. relative_mv = denominator for weight column (total portfolio or sleeve MV)."""
     if len(df) == 0:
         st.info("No positions")
         return
-    display = df[['ticker', 'sleeve', 'shares', 'avgCost', 'price', 'mv', 'weight', 'dayChg', 'dayPnl', 'totalRet', 'pnl', 'attrib', 'beta', 'ctr_risk', 'pcr']].copy()
+    display = df.copy()
+    denom = relative_mv if relative_mv and relative_mv > 0 else total_mv
+    display['rel_weight'] = np.where(denom > 0, (display['mv'] / denom) * 100, 0)
+    display = display[['ticker', 'sleeve', 'shares', 'avgCost', 'price', 'mv', 'rel_weight', 'dayChg', 'dayPnl', 'totalRet', 'pnl', 'attrib', 'beta', 'ctr_risk', 'pcr']].copy()
     display.columns = ['Ticker', 'Sleeve', 'Shares', 'Avg Cost', 'Price', 'Mkt Value', 'Weight %', 'Day Chg %', 'Day P&L', 'Total Rtn %', 'Total P&L', 'Attrib %', 'Beta', 'CTR %', 'PCR %']
     display = display.sort_values('Mkt Value', ascending=False)
 
@@ -745,17 +760,19 @@ def show_holdings(df):
             'Mkt Value': '${:,.2f}', 'Weight %': '{:.1f}%', 'Day Chg %': '{:+.2f}%',
             'Day P&L': '${:+,.2f}', 'Total Rtn %': '{:+.2f}%', 'Total P&L': '${:+,.2f}',
             'Attrib %': '{:+.3f}%', 'Beta': '{:.2f}', 'CTR %': '{:+.3f}%', 'PCR %': '{:.1f}%',
-        }).map(lambda v: 'color: #00d26a' if isinstance(v, (int, float)) and v > 0 else ('color: #ff3b3b' if isinstance(v, (int, float)) and v < 0 else ''),
+        }).applymap(lambda v: 'color: #00d26a' if isinstance(v, (int, float)) and v > 0 else ('color: #ff3b3b' if isinstance(v, (int, float)) and v < 0 else ''),
                    subset=['Day Chg %', 'Day P&L', 'Total Rtn %', 'Total P&L', 'Attrib %']),
         use_container_width=True, height=min(400, 40 + len(display) * 35)
     )
 
 with tab_all:
-    show_holdings(active)
+    show_holdings(active, total_mv)  # weight relative to total portfolio
 with tab_etf:
-    show_holdings(etf)
+    st.caption(f"Weights relative to ETF sleeve (${etf_mv:,.2f})")
+    show_holdings(etf, etf_mv)  # weight relative to ETF sleeve only
 with tab_stock:
-    show_holdings(stock)
+    st.caption(f"Weights relative to Stock sleeve (${stock_mv:,.2f})")
+    show_holdings(stock, stock_mv)  # weight relative to Stock sleeve only
 
 # ════════════════════════════════════════════════════
 # SLEEVE BREAKDOWN
@@ -1178,7 +1195,7 @@ with st.expander("LIVE PRICES", expanded=False):
         price_rows.append({'Ticker': row['ticker'], 'Type': row['sleeve'].upper(),
                           'Price': q.get('price', 0), 'Chg %': q.get('changePct', 0)})
     pdf = pd.DataFrame(price_rows)
-    st.dataframe(pdf.style.format({'Price': '${:.2f}', 'Chg %': '{:+.2f}%'}).map(
+    st.dataframe(pdf.style.format({'Price': '${:.2f}', 'Chg %': '{:+.2f}%'}).applymap(
         lambda v: 'color: #00d26a' if isinstance(v, (int, float)) and v > 0 else ('color: #ff3b3b' if isinstance(v, (int, float)) and v < 0 else ''),
         subset=['Chg %']), use_container_width=True)
 
@@ -1337,13 +1354,13 @@ def render_sleeve_drift(sleeve_name, sleeve_df, sleeve_targets, sleeve_mv, color
         drift_df.style.format({
             'Actual %': '{:.1f}%', 'Target %': '{:.1f}%', 'Drift %': '{:+.1f}%',
             'Actual $': '${:,.2f}', 'Target $': '${:,.2f}', 'Rebal $': '${:+,.2f}',
-        }).map(
+        }).applymap(
             lambda v: 'color: #00d26a; font-weight: 700' if v == 'OW' else ('color: #ff3b3b; font-weight: 700' if v == 'UW' else 'color: #555'),
             subset=['Status']
-        ).map(
+        ).applymap(
             lambda v: 'color: #00d26a' if isinstance(v, (int, float)) and v > 0.5 else ('color: #ff3b3b' if isinstance(v, (int, float)) and v < -0.5 else ''),
             subset=['Drift %']
-        ).map(
+        ).applymap(
             lambda v: 'color: #00d26a' if isinstance(v, (int, float)) and v > 0 else ('color: #ff3b3b' if isinstance(v, (int, float)) and v < 0 else ''),
             subset=['Rebal $']
         ),
@@ -1462,7 +1479,7 @@ if len(st.session_state.rebalances) > 0:
     st.dataframe(
         rebal[['date', 'action', 'ticker', 'shares', 'price', 'notional', 'notes']].style.format({
             'shares': '{:.4f}', 'price': '${:.2f}', 'notional': '${:,.2f}'
-        }).map(lambda v: 'color: #00d26a' if v in ['BUY', 'ADD'] else ('color: #ff3b3b' if v in ['SELL', 'TRIM'] else ''),
+        }).applymap(lambda v: 'color: #00d26a' if v in ['BUY', 'ADD'] else ('color: #ff3b3b' if v in ['SELL', 'TRIM'] else ''),
                    subset=['action']),
         use_container_width=True, height=min(300, 40 + len(rebal) * 35)
     )
