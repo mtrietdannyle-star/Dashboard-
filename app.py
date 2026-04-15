@@ -507,25 +507,26 @@ try:
             if t in alpha_returns.columns:
                 bm_daily += w * alpha_returns[t]
 
-        # Cumulative returns
+        # Cumulative returns (for display)
         cum_port_ret = ((1 + port_daily).cumprod().iloc[-1] - 1) * 100
         cum_bm_ret = ((1 + bm_daily).cumprod().iloc[-1] - 1) * 100
         cum_excess = cum_port_ret - cum_bm_ret
 
-        # Annualize
         n_days = len(alpha_returns)
-        ann_factor = 252 / n_days if n_days > 0 else 1
-        ann_port = ((1 + cum_port_ret / 100) ** ann_factor - 1) * 100
-        ann_bm = ((1 + cum_bm_ret / 100) ** ann_factor - 1) * 100
 
         # Portfolio beta to benchmark
         cov_pb = port_daily.cov(bm_daily)
         var_bm = bm_daily.var()
         port_beta_to_bm = cov_pb / var_bm if var_bm > 0 else 1.0
 
-        # Jensen's Alpha (annualized) = Rp - [Rf + β(Rm - Rf)]
+        # Jensen's Alpha — regression intercept approach (stable for short periods)
+        # Daily: alpha_d = mean(Rp - Rf) - beta * mean(Rm - Rf)
+        # Annualized: alpha_d * 252
         rf_daily = rf_rate / 252
-        jensens_alpha = ann_port - (rf_rate * 100 + port_beta_to_bm * (ann_bm - rf_rate * 100))
+        excess_port = port_daily - rf_daily   # Rp - Rf daily
+        excess_bm = bm_daily - rf_daily       # Rm - Rf daily
+        alpha_daily = excess_port.mean() - port_beta_to_bm * excess_bm.mean()
+        jensens_alpha = alpha_daily * 252 * 100  # annualize and convert to %
 
 except Exception as e:
     pass
