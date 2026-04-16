@@ -475,6 +475,7 @@ blended_chg = sum((c['weight'] / total_bm_weight) * quotes.get(c['ticker'], {}).
 # ── Jensen's Alpha & Cumulative Over/Underperformance ──
 # Uses inception-to-date returns
 jensens_alpha = None
+alpha_daily_pct = None
 port_beta_to_bm = None
 cum_port_ret = None
 cum_bm_ret = None
@@ -525,8 +526,9 @@ try:
         rf_daily = rf_rate / 252
         excess_port = port_daily - rf_daily   # Rp - Rf daily
         excess_bm = bm_daily - rf_daily       # Rm - Rf daily
-        alpha_daily = excess_port.mean() - port_beta_to_bm * excess_bm.mean()
-        jensens_alpha = alpha_daily * 252 * 100  # annualize and convert to %
+        alpha_daily_val = excess_port.mean() - port_beta_to_bm * excess_bm.mean()
+        alpha_daily_pct = alpha_daily_val * 100  # daily alpha in %
+        jensens_alpha = alpha_daily_val * 252 * 100  # annualize and convert to %
 
 except Exception as e:
     pass
@@ -581,33 +583,40 @@ with r2c5:
     st.metric("PORT VOL (ANN)", f"{port_vol*100:.1f}%" if port_vol > 0 else "\u2014", "30d daily returns \u00d7 \u221a252" if port_vol > 0 else "Need 10+ days data")
 
 # Row 3: Alpha, Cumulative Performance vs Benchmark
-r3c1, r3c2, r3c3, r3c4, r3c5 = st.columns(5)
+r3c1, r3c2, r3c3, r3c4, r3c5, r3c6 = st.columns(6)
 with r3c1:
+    if alpha_daily_pct is not None:
+        st.metric("JENSEN'S \u03b1 (DAILY)", f"{alpha_daily_pct:+.3f}%",
+                  "Rp\u2212[Rf+\u03b2(Rm\u2212Rf)] daily",
+                  delta_color="normal" if alpha_daily_pct >= 0 else "inverse")
+    else:
+        st.metric("JENSEN'S \u03b1 (DAILY)", "\u2014", "Need 5+ days history")
+with r3c2:
     if jensens_alpha is not None:
         st.metric("JENSEN'S \u03b1 (ANN)", f"{jensens_alpha:+.2f}%",
-                  f"Rp\u2212[Rf+\u03b2(Rm\u2212Rf)]",
+                  f"daily \u03b1 \u00d7 252",
                   delta_color="normal" if jensens_alpha >= 0 else "inverse")
     else:
         st.metric("JENSEN'S \u03b1 (ANN)", "\u2014", "Need 5+ days history")
-with r3c2:
+with r3c3:
     if port_beta_to_bm is not None:
-        st.metric("PORT \u03b2 TO BM", f"{port_beta_to_bm:.2f}", f"Cov(Rp,Rm)/Var(Rm) since inception")
+        st.metric("PORT \u03b2 TO BM", f"{port_beta_to_bm:.2f}", f"Cov(Rp,Rm)/Var(Rm)")
     else:
         st.metric("PORT \u03b2 TO BM", "\u2014", "Need 5+ days history")
-with r3c3:
+with r3c4:
     if cum_port_ret is not None:
         st.metric("PORT RTN (INCEP)", f"{cum_port_ret:+.2f}%", f"Since {st.session_state.inception_date}",
                   delta_color="normal" if cum_port_ret >= 0 else "inverse")
     else:
         st.metric("PORT RTN (INCEP)", "\u2014")
-with r3c4:
+with r3c5:
     if cum_bm_ret is not None:
         bm_label_short = '/'.join([c['ticker'] for c in bm_comps])
         st.metric(f"BM RTN (INCEP)", f"{cum_bm_ret:+.2f}%", f"{bm_label_short} since inception",
                   delta_color="normal" if cum_bm_ret >= 0 else "inverse")
     else:
         st.metric("BM RTN (INCEP)", "\u2014")
-with r3c5:
+with r3c6:
     if cum_excess is not None:
         label = "OUTPERFORMANCE" if cum_excess >= 0 else "UNDERPERFORMANCE"
         st.metric(label, f"{cum_excess:+.2f}%", f"Port \u2212 BM cumulative",
