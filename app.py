@@ -489,53 +489,79 @@ try:
     alpha_hist = fetch_history(all_alpha_tickers, inception)
 
     if not alpha_hist.empty and len(alpha_hist) >= 5:
-        # ── Rebuild actual portfolio value history from transaction log ──
+        # ── Build TIME-WEIGHTED RETURN series from transaction log ──
+        # TWR excludes the effect of deposits/withdrawals (which are not returns)
+        # Formula: on days with cash flows, compute return from yesterday's close value
+        # to today's close value BEFORE the new cash flow is invested
         rebal_log = st.session_state.rebalances.copy() if len(st.session_state.rebalances) > 0 else pd.DataFrame()
         if len(rebal_log) > 0:
             rebal_log['parsed_date'] = pd.to_datetime(rebal_log['date'], format='%m/%d/%Y', errors='coerce')
             rebal_log = rebal_log.sort_values('parsed_date').reset_index(drop=True)
 
-        # For each day in alpha_hist, compute shares held for each ticker
-        # then portfolio value = sum(shares * price)
-        port_values = []
         dates_idx = alpha_hist.index
+        # Track shares held BEFORE trades on each date, and cash flow ON each date
+        shares_pre = {}  # shares held at start of each date
+        shares_post = {}  # shares held at end of each date (after trades)
 
-        for date in dates_idx:
-            # Get all transactions up to and including this date
-            if len(rebal_log) > 0:
-                active_trades = rebal_log[rebal_log['parsed_date'] <= date]
+        daily_returns_list = []
+        prev_end_val = None
+
+        for i, date in enumerate(dates_idx):
+            # Shares at start of day = shares at end of previous day
+            if i == 0:
+                shares_today_start = {}
             else:
-                active_trades = pd.DataFrame()
+                shares_today_start = shares_post.copy()
 
-            # Compute shares held per ticker as of this date
-            shares_held = {}
-            for _, trade in active_trades.iterrows():
-                tkr = trade['ticker']
-                qty = float(trade.get('shares', 0))
-                act = trade.get('action', 'BUY')
-                if tkr not in shares_held:
-                    shares_held[tkr] = 0.0
-                if act in ['BUY', 'ADD']:
-                    shares_held[tkr] += qty
-                elif act in ['SELL', 'TRIM']:
-                    shares_held[tkr] -= qty
-
-            # Compute portfolio value on this date
-            val = 0.0
-            for tkr, sh in shares_held.items():
+            # Step 1: Value at start of day (shares from yesterday's close × today's open-proxy = yesterday's close)
+            # Actually use today's close × yesterday's shares for the "what if no trades" value
+            val_no_trade = 0.0
+            for tkr, sh in shares_today_start.items():
                 if sh > 0.0001 and tkr in alpha_hist.columns:
                     price = alpha_hist.loc[date, tkr]
                     if pd.notna(price):
-                        val += sh * price
-            port_values.append(val)
+                        val_no_trade += sh * price
 
-        port_value_series = pd.Series(port_values, index=dates_idx)
-        # Remove leading zeros (before inception / any positions)
-        port_value_series = port_value_series[port_value_series > 0]
+            # Step 2: Compute return from yesterday's end value to today's pre-trade value
+            if prev_end_val is not None and prev_end_val > 0 and val_no_trade > 0:
+                daily_ret_val = (val_no_trade / prev_end_val) - 1
+                daily_returns_list.append((date, daily_ret_val))
+            elif prev_end_val is not None and prev_end_val > 0 and val_no_trade == 0:
+                # No positions today but had some yesterday - shouldn't happen normally
+                daily_returns_list.append((date, 0.0))
+            # If prev_end_val is None (first day), no return yet
 
-        if len(port_value_series) >= 5:
-            # Portfolio daily returns from actual value series
-            port_daily = port_value_series.pct_change().dropna()
+            # Step 3: Apply today's trades to get end-of-day shares
+            shares_today_end = shares_today_start.copy()
+            if len(rebal_log) > 0:
+                today_trades = rebal_log[rebal_log['parsed_date'].dt.date == date.date()]
+                for _, trade in today_trades.iterrows():
+                    tkr = trade['ticker']
+                    qty = float(trade.get('shares', 0))
+                    act = trade.get('action', 'BUY')
+                    if tkr not in shares_today_end:
+                        shares_today_end[tkr] = 0.0
+                    if act in ['BUY', 'ADD']:
+                        shares_today_end[tkr] += qty
+                    elif act in ['SELL', 'TRIM']:
+                        shares_today_end[tkr] -= qty
+
+            # Step 4: End-of-day value with new shares
+            val_end = 0.0
+            for tkr, sh in shares_today_end.items():
+                if sh > 0.0001 and tkr in alpha_hist.columns:
+                    price = alpha_hist.loc[date, tkr]
+                    if pd.notna(price):
+                        val_end += sh * price
+
+            shares_post = shares_today_end
+            prev_end_val = val_end if val_end > 0 else prev_end_val
+
+        if len(daily_returns_list) >= 5:
+            port_daily = pd.Series(
+                [r for _, r in daily_returns_list],
+                index=[d for d, _ in daily_returns_list]
+            )
 
             # Blended benchmark daily returns
             alpha_returns = alpha_hist.pct_change().dropna()
@@ -552,7 +578,7 @@ try:
             bm_daily = bm_daily.loc[common_idx]
 
             if len(port_daily) >= 5:
-                # Cumulative returns (for display)
+                # Cumulative TWR returns
                 cum_port_ret = ((1 + port_daily).cumprod().iloc[-1] - 1) * 100
                 cum_bm_ret = ((1 + bm_daily).cumprod().iloc[-1] - 1) * 100
                 cum_excess = cum_port_ret - cum_bm_ret
@@ -699,40 +725,76 @@ hist_tickers = list(set(hist_tickers))
 hist = fetch_history(hist_tickers, start_date)
 
 if not hist.empty and len(hist) >= 2:
-    # Portfolio value per day — rebuild from transaction log (shares held on each date)
+    # Time-Weighted Return rebuild (excludes cash flow distortion from deposits/buys)
     rebal_chart = st.session_state.rebalances.copy() if len(st.session_state.rebalances) > 0 else pd.DataFrame()
     if len(rebal_chart) > 0:
         rebal_chart['parsed_date'] = pd.to_datetime(rebal_chart['date'], format='%m/%d/%Y', errors='coerce')
         rebal_chart = rebal_chart.sort_values('parsed_date').reset_index(drop=True)
 
-    port_vals = []
+    shares_post = {}
+    prev_end_val = None
+    daily_rets = []
+    dates_kept = []
+
     for d in hist.index:
-        if len(rebal_chart) > 0:
-            trades_upto = rebal_chart[rebal_chart['parsed_date'] <= d]
-        else:
-            trades_upto = pd.DataFrame()
-        shares_map = {}
-        for _, tr in trades_upto.iterrows():
-            tk = tr['ticker']
-            q = float(tr.get('shares', 0))
-            a = tr.get('action', 'BUY')
-            if tk not in shares_map:
-                shares_map[tk] = 0.0
-            if a in ['BUY', 'ADD']:
-                shares_map[tk] += q
-            elif a in ['SELL', 'TRIM']:
-                shares_map[tk] -= q
-        v = 0.0
-        for tk, s in shares_map.items():
+        shares_start = shares_post.copy()
+        val_no_trade = 0.0
+        for tk, s in shares_start.items():
             if s > 0.0001 and tk in hist.columns:
                 p = hist.loc[d, tk]
                 if pd.notna(p):
-                    v += s * p
-        port_vals.append(v)
-    port_val = pd.Series(port_vals, index=hist.index)
+                    val_no_trade += s * p
 
-    # If no transactions happened before chart start, fall back to current holdings
-    if (port_val == 0).all() or port_val.iloc[0] == 0:
+        if prev_end_val is not None and prev_end_val > 0 and val_no_trade > 0:
+            daily_rets.append((val_no_trade / prev_end_val) - 1)
+            dates_kept.append(d)
+        elif prev_end_val is not None and prev_end_val > 0:
+            daily_rets.append(0.0)
+            dates_kept.append(d)
+
+        # Apply today's trades
+        shares_end = shares_start.copy()
+        if len(rebal_chart) > 0:
+            today_trades = rebal_chart[rebal_chart['parsed_date'].dt.date == d.date()]
+            for _, tr in today_trades.iterrows():
+                tk = tr['ticker']
+                q = float(tr.get('shares', 0))
+                a = tr.get('action', 'BUY')
+                if tk not in shares_end:
+                    shares_end[tk] = 0.0
+                if a in ['BUY', 'ADD']:
+                    shares_end[tk] += q
+                elif a in ['SELL', 'TRIM']:
+                    shares_end[tk] -= q
+
+        val_end = 0.0
+        for tk, s in shares_end.items():
+            if s > 0.0001 and tk in hist.columns:
+                p = hist.loc[d, tk]
+                if pd.notna(p):
+                    val_end += s * p
+
+        shares_post = shares_end
+        if val_end > 0:
+            prev_end_val = val_end
+        elif prev_end_val is None:
+            prev_end_val = None  # still no positions
+
+    if len(daily_rets) >= 2:
+        port_daily_series = pd.Series(daily_rets, index=dates_kept)
+        port_ret = ((1 + port_daily_series).cumprod() - 1) * 100
+
+        # Benchmark: align to same dates
+        bm_val = pd.Series(0.0, index=port_ret.index)
+        hist_aligned = hist.loc[port_ret.index]
+        for c in bm_comps:
+            t = c['ticker']
+            w = c['weight'] / total_bm_weight if total_bm_weight > 0 else 0
+            if t in hist_aligned.columns:
+                bm_val += w * hist_aligned[t].ffill()
+        bm_ret = ((bm_val / bm_val.iloc[0]) - 1) * 100 if bm_val.iloc[0] > 0 else pd.Series(0.0, index=port_ret.index)
+    else:
+        # Fallback to simple current-holdings calculation
         port_val = pd.Series(0.0, index=hist.index)
         for _, row in active.iterrows():
             t = row['ticker']
@@ -740,22 +802,14 @@ if not hist.empty and len(hist) >= 2:
                 port_val += row['shares'] * hist[t].ffill().fillna(row['avgCost'])
             else:
                 port_val += row['shares'] * row['avgCost']
-
-    # Drop any leading zeros (dates before any positions existed)
-    port_val = port_val[port_val > 0]
-    hist_aligned = hist.loc[port_val.index]
-
-    # Blended benchmark
-    bm_val = pd.Series(0.0, index=hist_aligned.index)
-    for c in bm_comps:
-        t = c['ticker']
-        w = c['weight'] / total_bm_weight if total_bm_weight > 0 else 0
-        if t in hist_aligned.columns:
-            bm_val += w * hist_aligned[t].ffill()
-
-    # Cumulative returns
-    port_ret = ((port_val / port_val.iloc[0]) - 1) * 100
-    bm_ret = ((bm_val / bm_val.iloc[0]) - 1) * 100
+        bm_val = pd.Series(0.0, index=hist.index)
+        for c in bm_comps:
+            t = c['ticker']
+            w = c['weight'] / total_bm_weight if total_bm_weight > 0 else 0
+            if t in hist.columns:
+                bm_val += w * hist[t].ffill()
+        port_ret = ((port_val / port_val.iloc[0]) - 1) * 100 if port_val.iloc[0] > 0 else pd.Series(0.0, index=hist.index)
+        bm_ret = ((bm_val / bm_val.iloc[0]) - 1) * 100 if bm_val.iloc[0] > 0 else pd.Series(0.0, index=hist.index)
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=port_ret.index, y=port_ret.values, name='Portfolio',
