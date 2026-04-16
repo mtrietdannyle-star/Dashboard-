@@ -473,7 +473,7 @@ total_bm_weight = sum(c['weight'] for c in bm_comps)
 blended_chg = sum((c['weight'] / total_bm_weight) * quotes.get(c['ticker'], {}).get('changePct', 0) for c in bm_comps) if total_bm_weight > 0 else 0
 
 # ── Jensen's Alpha & Cumulative Over/Underperformance ──
-# Uses inception-to-date returns
+# Rebuilds actual historical portfolio from transaction log
 jensens_alpha = None
 alpha_daily_pct = None
 port_beta_to_bm = None
@@ -489,46 +489,86 @@ try:
     alpha_hist = fetch_history(all_alpha_tickers, inception)
 
     if not alpha_hist.empty and len(alpha_hist) >= 5:
-        # Daily returns
-        alpha_returns = alpha_hist.pct_change().dropna()
+        # ── Rebuild actual portfolio value history from transaction log ──
+        rebal_log = st.session_state.rebalances.copy() if len(st.session_state.rebalances) > 0 else pd.DataFrame()
+        if len(rebal_log) > 0:
+            rebal_log['parsed_date'] = pd.to_datetime(rebal_log['date'], format='%m/%d/%Y', errors='coerce')
+            rebal_log = rebal_log.sort_values('parsed_date').reset_index(drop=True)
 
-        # Portfolio daily return series (weighted by current holdings)
-        port_daily = pd.Series(0.0, index=alpha_returns.index)
-        for _, row in active.iterrows():
-            t = row['ticker']
-            w = row['weight'] / 100
-            if t in alpha_returns.columns:
-                port_daily += w * alpha_returns[t]
+        # For each day in alpha_hist, compute shares held for each ticker
+        # then portfolio value = sum(shares * price)
+        port_values = []
+        dates_idx = alpha_hist.index
 
-        # Blended benchmark daily return series
-        bm_daily = pd.Series(0.0, index=alpha_returns.index)
-        for c in bm_comps:
-            t = c['ticker']
-            w = c['weight'] / total_bm_weight if total_bm_weight > 0 else 0
-            if t in alpha_returns.columns:
-                bm_daily += w * alpha_returns[t]
+        for date in dates_idx:
+            # Get all transactions up to and including this date
+            if len(rebal_log) > 0:
+                active_trades = rebal_log[rebal_log['parsed_date'] <= date]
+            else:
+                active_trades = pd.DataFrame()
 
-        # Cumulative returns (for display)
-        cum_port_ret = ((1 + port_daily).cumprod().iloc[-1] - 1) * 100
-        cum_bm_ret = ((1 + bm_daily).cumprod().iloc[-1] - 1) * 100
-        cum_excess = cum_port_ret - cum_bm_ret
+            # Compute shares held per ticker as of this date
+            shares_held = {}
+            for _, trade in active_trades.iterrows():
+                tkr = trade['ticker']
+                qty = float(trade.get('shares', 0))
+                act = trade.get('action', 'BUY')
+                if tkr not in shares_held:
+                    shares_held[tkr] = 0.0
+                if act in ['BUY', 'ADD']:
+                    shares_held[tkr] += qty
+                elif act in ['SELL', 'TRIM']:
+                    shares_held[tkr] -= qty
 
-        n_days = len(alpha_returns)
+            # Compute portfolio value on this date
+            val = 0.0
+            for tkr, sh in shares_held.items():
+                if sh > 0.0001 and tkr in alpha_hist.columns:
+                    price = alpha_hist.loc[date, tkr]
+                    if pd.notna(price):
+                        val += sh * price
+            port_values.append(val)
 
-        # Portfolio beta to benchmark
-        cov_pb = port_daily.cov(bm_daily)
-        var_bm = bm_daily.var()
-        port_beta_to_bm = cov_pb / var_bm if var_bm > 0 else 1.0
+        port_value_series = pd.Series(port_values, index=dates_idx)
+        # Remove leading zeros (before inception / any positions)
+        port_value_series = port_value_series[port_value_series > 0]
 
-        # Jensen's Alpha — regression intercept approach (stable for short periods)
-        # Daily: alpha_d = mean(Rp - Rf) - beta * mean(Rm - Rf)
-        # Annualized: alpha_d * 252
-        rf_daily = rf_rate / 252
-        excess_port = port_daily - rf_daily   # Rp - Rf daily
-        excess_bm = bm_daily - rf_daily       # Rm - Rf daily
-        alpha_daily_val = excess_port.mean() - port_beta_to_bm * excess_bm.mean()
-        alpha_daily_pct = alpha_daily_val * 100  # daily alpha in %
-        jensens_alpha = alpha_daily_val * 252 * 100  # annualize and convert to %
+        if len(port_value_series) >= 5:
+            # Portfolio daily returns from actual value series
+            port_daily = port_value_series.pct_change().dropna()
+
+            # Blended benchmark daily returns
+            alpha_returns = alpha_hist.pct_change().dropna()
+            bm_daily = pd.Series(0.0, index=alpha_returns.index)
+            for c in bm_comps:
+                t = c['ticker']
+                w = c['weight'] / total_bm_weight if total_bm_weight > 0 else 0
+                if t in alpha_returns.columns:
+                    bm_daily += w * alpha_returns[t]
+
+            # Align on common dates
+            common_idx = port_daily.index.intersection(bm_daily.index)
+            port_daily = port_daily.loc[common_idx]
+            bm_daily = bm_daily.loc[common_idx]
+
+            if len(port_daily) >= 5:
+                # Cumulative returns (for display)
+                cum_port_ret = ((1 + port_daily).cumprod().iloc[-1] - 1) * 100
+                cum_bm_ret = ((1 + bm_daily).cumprod().iloc[-1] - 1) * 100
+                cum_excess = cum_port_ret - cum_bm_ret
+
+                # Portfolio beta to benchmark
+                cov_pb = port_daily.cov(bm_daily)
+                var_bm = bm_daily.var()
+                port_beta_to_bm = cov_pb / var_bm if var_bm > 0 else 1.0
+
+                # Jensen's Alpha — regression intercept
+                rf_daily = rf_rate / 252
+                excess_port = port_daily - rf_daily
+                excess_bm = bm_daily - rf_daily
+                alpha_daily_val = excess_port.mean() - port_beta_to_bm * excess_bm.mean()
+                alpha_daily_pct = alpha_daily_val * 100
+                jensens_alpha = alpha_daily_val * 252 * 100
 
 except Exception as e:
     pass
@@ -659,22 +699,59 @@ hist_tickers = list(set(hist_tickers))
 hist = fetch_history(hist_tickers, start_date)
 
 if not hist.empty and len(hist) >= 2:
-    # Portfolio value per day
-    port_val = pd.Series(0.0, index=hist.index)
-    for _, row in active.iterrows():
-        t = row['ticker']
-        if t in hist.columns:
-            port_val += row['shares'] * hist[t].ffill().fillna(row['avgCost'])
+    # Portfolio value per day — rebuild from transaction log (shares held on each date)
+    rebal_chart = st.session_state.rebalances.copy() if len(st.session_state.rebalances) > 0 else pd.DataFrame()
+    if len(rebal_chart) > 0:
+        rebal_chart['parsed_date'] = pd.to_datetime(rebal_chart['date'], format='%m/%d/%Y', errors='coerce')
+        rebal_chart = rebal_chart.sort_values('parsed_date').reset_index(drop=True)
+
+    port_vals = []
+    for d in hist.index:
+        if len(rebal_chart) > 0:
+            trades_upto = rebal_chart[rebal_chart['parsed_date'] <= d]
         else:
-            port_val += row['shares'] * row['avgCost']
+            trades_upto = pd.DataFrame()
+        shares_map = {}
+        for _, tr in trades_upto.iterrows():
+            tk = tr['ticker']
+            q = float(tr.get('shares', 0))
+            a = tr.get('action', 'BUY')
+            if tk not in shares_map:
+                shares_map[tk] = 0.0
+            if a in ['BUY', 'ADD']:
+                shares_map[tk] += q
+            elif a in ['SELL', 'TRIM']:
+                shares_map[tk] -= q
+        v = 0.0
+        for tk, s in shares_map.items():
+            if s > 0.0001 and tk in hist.columns:
+                p = hist.loc[d, tk]
+                if pd.notna(p):
+                    v += s * p
+        port_vals.append(v)
+    port_val = pd.Series(port_vals, index=hist.index)
+
+    # If no transactions happened before chart start, fall back to current holdings
+    if (port_val == 0).all() or port_val.iloc[0] == 0:
+        port_val = pd.Series(0.0, index=hist.index)
+        for _, row in active.iterrows():
+            t = row['ticker']
+            if t in hist.columns:
+                port_val += row['shares'] * hist[t].ffill().fillna(row['avgCost'])
+            else:
+                port_val += row['shares'] * row['avgCost']
+
+    # Drop any leading zeros (dates before any positions existed)
+    port_val = port_val[port_val > 0]
+    hist_aligned = hist.loc[port_val.index]
 
     # Blended benchmark
-    bm_val = pd.Series(0.0, index=hist.index)
+    bm_val = pd.Series(0.0, index=hist_aligned.index)
     for c in bm_comps:
         t = c['ticker']
         w = c['weight'] / total_bm_weight if total_bm_weight > 0 else 0
-        if t in hist.columns:
-            bm_val += w * hist[t].ffill()
+        if t in hist_aligned.columns:
+            bm_val += w * hist_aligned[t].ffill()
 
     # Cumulative returns
     port_ret = ((port_val / port_val.iloc[0]) - 1) * 100
